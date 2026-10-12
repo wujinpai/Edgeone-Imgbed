@@ -932,9 +932,12 @@ async function uploadSingle(t: UploadTask): Promise<void> {
     const hit = lookupHash(t.contentHash)
     if (hit) {
       t.progress = 100
+      // hit.url 是公开代理链接（{站点}/api/img/<CNB 相对路径>）：先剥掉站点与 /api/img/ 前缀，
+      // 再交由 toCnbUrl 拼源站直链；直接把整条链接传进去会套娃成 https://cnb.cool/https://站点/...
+      const hitCnbPath = hit.url.includes('/api/img/') ? hit.url.split('/api/img/')[1] : ''
       const uploadInfo: UploadInfo = {
         url: hit.url,
-        urlOriginal: toCnbUrl(hit.url.replace('/api/img/', '/-/imgs/')),
+        urlOriginal: toCnbUrl(hitCnbPath),
         thumbnailUrl: hit.thumbnailUrl || '',
         name: t.rawName,
         size: hit.size,

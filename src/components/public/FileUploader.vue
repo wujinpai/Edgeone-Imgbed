@@ -26,7 +26,7 @@
             {{ isDragging ? '快松手！' : '点击或拖拽上传' }}
           </p>
           <p class="mx-auto max-w-md text-xs leading-relaxed text-gray-400 sm:text-sm dark:text-gray-500">
-            支持 JPG、PNG、GIF、WebP 图片，以及 PDF / Office 文档 / 压缩包（CNB 单文件最大 50MB，其他存储桶按实际限制），可批量多选、Ctrl+V 粘贴或拖入整个文件夹
+            支持 JPG、PNG、GIF、WebP 图片，以及 PDF / Office 文档 / 压缩包（单文件最大 5MB），可批量多选、Ctrl+V 粘贴或拖入整个文件夹
           </p>
         </div>
       </div>
@@ -79,7 +79,7 @@
             {{ isDragging ? '快松手！' : '点击或拖拽上传' }}
           </p>
           <p class="text-sm text-gray-400 dark:text-gray-500">
-            支持 JPG, PNG, GIF, WebP 图片，以及 PDF / Office 文档 / 压缩包（CNB 单文件最大 50MB，其他存储桶按实际限制），可批量多选、Ctrl+V 粘贴或拖入整个文件夹
+            支持 JPG, PNG, GIF, WebP 图片，以及 PDF / Office 文档 / 压缩包（单文件最大 5MB），可批量多选、Ctrl+V 粘贴或拖入整个文件夹
           </p>
         </div>
       </div>
@@ -230,7 +230,7 @@
       </Transition>
     </Teleport>
 
-    <!-- 集中提示弹窗：格式拒绝 / CNB 50MB 超限 -->
+    <!-- 集中提示弹窗：格式拒绝 / CNB 5MB 超限 -->
     <Teleport to="body">
       <div
         v-if="alertModal"
@@ -271,9 +271,9 @@ import { useStorageUsage } from '@/composables/useStorageUsage'
 import { enqueuePendingRecord, type PendingRecord } from '@/utils/pendingRecords'
 import { hashBlob, lookupHash, rememberHash } from '@/utils/dedupeCache'
 
-// 原始文件上限：客户端 50MB（与 CNB 单文件上限同口径；文档/压缩包不走压缩，
-// 必须放行到 50MB）。其他存储桶的实际上限由服务端按桶校验
-const RAW_MAX_MB = 50
+// 原始文件粗筛上限 30MB：图片会被压缩到远小于此值，故粗筛须高于真实上传上限；
+// 文档/压缩包不走压缩，实际上限由 CNB_MAX_BYTES（5MB）与服务端按桶校验决定
+const RAW_MAX_MB = 30
 const BATCH_FLUSH_SIZE = 50
 // 允许上传的图片 MIME（内置压缩/缩略图管线仅对图片生效）
 const IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
@@ -427,8 +427,8 @@ const tasks = ref<UploadTask[]>([])
 const rejectedFiles = ref<RejectedFile[]>([])
 // 集中提示弹窗（格式拒绝 / CNB 超限），替代零散 toast
 const alertModal = ref<{ title: string; message: string } | null>(null)
-// CNB 仓库单文件上限 50MB（与服务端 CNB_MAX_MB 同口径）
-const CNB_MAX_BYTES = 50 * 1024 * 1024
+// CNB 仓库单文件上限 5MB（与服务端 CNB_MAX_MB 同口径；平台对请求 body 另有 ~6MB 硬上限）
+const CNB_MAX_BYTES = 5 * 1024 * 1024
 // 整批全部上传成功后置 true：顶部拖拽区恢复空状态，下方任务列表（完成状态）保留展示
 const batchCompleted = ref<boolean>(false)
 const processingIndex = ref(0)
@@ -917,10 +917,10 @@ onUnmounted(() => {
 // 单张上传 + 入批量落库队列；失败仅把该任务标记为 error，由调用方决定是否继续
 async function uploadSingle(t: UploadTask): Promise<void> {
   if (!t.file) return
-  // CNB 仓库单文件上限 50MB：压缩产物（或原图/文档直传）仍超限 → 该张失败，弹窗在批次收尾统一提示
+  // CNB 仓库单文件上限 5MB：压缩产物（或原图/文档直传）仍超限 → 该张失败，弹窗在批次收尾统一提示
   if (effectiveId.value === 'cnb' && t.file.size > CNB_MAX_BYTES) {
     t.status = 'error'
-    t.errorMsg = 'CNB 仓库单文件最大支持 50MB'
+    t.errorMsg = 'CNB 仓库单文件最大支持 5MB'
     cnbOversizeCount.value++
     return
   }
@@ -1112,7 +1112,7 @@ async function retryTask(t: UploadTask): Promise<void> {
 // 并发上传：同时传 CONCURRENCY 张，单张失败不中断批次
 const CONCURRENCY = 3
 
-// CNB 50MB 超限计数（批次内累计，收尾统一弹窗一次）
+// CNB 5MB 超限计数（批次内累计，收尾统一弹窗一次）
 const cnbOversizeCount = ref(0)
 
 async function startUpload(): Promise<void> {
@@ -1144,7 +1144,7 @@ async function startUpload(): Promise<void> {
   if (cnbOversizeCount.value > 0) {
     alertModal.value = {
       title: '超出 CNB 仓库限制',
-      message: `CNB 仓库单文件最大支持 50MB！本次 ${cnbOversizeCount.value} 个文件仍超过 50MB，未上传。可切换到其他存储桶（顶栏下拉）或调低压缩质量后重试。`,
+      message: `CNB 仓库单文件最大支持 5MB！本次 ${cnbOversizeCount.value} 个文件仍超过 5MB，未上传。可切换到其他存储桶（顶栏下拉）或调低压缩质量后重试。`,
     }
     cnbOversizeCount.value = 0
   }

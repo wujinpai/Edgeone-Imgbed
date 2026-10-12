@@ -8,7 +8,7 @@ export interface SiteConfig {
   maxUploadMb: number
 }
 
-const DEFAULT_MAX_UPLOAD_MB = 25
+const DEFAULT_MAX_UPLOAD_MB = 5
 
 const bucket = ref('')
 const passwordEnabled = ref<boolean | null>(null) // null = 未知（探测中/失败）

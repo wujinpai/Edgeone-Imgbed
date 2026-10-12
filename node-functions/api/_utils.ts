@@ -369,8 +369,9 @@ async function proxyImageRequest(
         }
         const contentType = isImg ? upstreamType : 'application/octet-stream'
         const contentLength = response.headers.get('content-length')
-        // 代理上限与 CNB 上传上限同口径：超限直接 413，避免 arrayBuffer 全量进内存拖垮实例
-        if (contentLength && Number(contentLength) > CNB_MAX_BYTES) {
+        // 代理读取上限 30MB：与上传上限解耦（存量文件可能大于当前上传上限，仍须能取回），
+        // 超限直接 413，避免 arrayBuffer 全量进内存拖垮实例
+        if (contentLength && Number(contentLength) > 30 * 1024 * 1024) {
           await response.arrayBuffer().catch(() => {})
           return res.status(413).json({ error: 'File too large to proxy' })
         }
@@ -481,10 +482,12 @@ function normalizeCnbAssetPath(raw: string): string {
 }
 
 /** 服务端单文件大小上限（MB），可用环境变量 MAX_UPLOAD_MB 覆盖。
+ * 取 5MB：平台（EdgeOne 边缘函数）对请求 body 有 ~6MB 硬上限，配更大也传不上去，
+ * 只会让超限失败从「选文件即提示」退化成看不懂的 500。
  * 前端压缩后直传产物远小于此值；该上限主要约束 GIF / "保持原图" 的大文件直传 */
 const MAX_UPLOAD_MB = (() => {
   const n = Number(process.env.MAX_UPLOAD_MB)
-  return Number.isFinite(n) && n > 0 ? Math.min(100, Math.round(n)) : 25
+  return Number.isFinite(n) && n > 0 ? Math.min(100, Math.round(n)) : 5
 })()
 
 /** 上传限流（次/分钟/IP），可用环境变量 UPLOAD_RATE_LIMIT 覆盖 */
@@ -549,12 +552,14 @@ function isAllowedFileName(name: string): boolean {
 }
 
 /**
- * CNB 对象存储单文件上限（MB）：官方 OpenAPI 未文档化限制，按需求取 50MB。
- * 上传主图/文件走 CNB 时由服务端强制校验（前端亦有同名前置校验）。
+ * CNB 对象存储单文件上限（MB），取 5MB。
+ * 实测 CNB 侧本身可接受 50MB（PUT 返回 200），真正的瓶颈是平台对请求 body 的 ~6MB 硬上限
+ * （上传须经函数转发），故取 5MB 留出 multipart 开销余量。
+ * 上传主图/文件走 CNB 时由服务端强制校验（前端亦有同名前置校验，改这里需同步改 FileUploader.vue）。
  */
 const CNB_MAX_MB = (() => {
   const n = Number(process.env.CNB_MAX_UPLOAD_MB)
-  return Number.isFinite(n) && n > 0 ? Math.min(100, Math.round(n)) : 50
+  return Number.isFinite(n) && n > 0 ? Math.min(100, Math.round(n)) : 5
 })()
 const CNB_MAX_BYTES = CNB_MAX_MB * 1024 * 1024
 

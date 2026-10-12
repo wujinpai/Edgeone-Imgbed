@@ -8,8 +8,10 @@ let pending: Promise<void> | null = null
 export function loadAuthStatus(): Promise<void> {
   if (passwordEnabled !== null) return Promise.resolve()
   if (!pending) {
+    // 走 instance 默认 baseURL(/api)：/auth/status 挂在 node-functions 的 /api 下，
+    // 若传 baseURL:'' 会请求裸 /auth/status，在生产命中静态资源(index.html) 导致探测失真
     pending = axios
-      .get('/auth/status', { baseURL: '', timeout: 5000 })
+      .get('/auth/status', { timeout: 5000 })
       .then(({ data }) => {
         if (data?.code === 0) passwordEnabled = data.data?.passwordEnabled !== false
       })

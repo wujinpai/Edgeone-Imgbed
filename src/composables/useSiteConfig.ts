@@ -20,7 +20,8 @@ export function useSiteConfig() {
     if (fetched) return
     fetched = true
     try {
-      const { data } = await axios.get('/auth/status', { baseURL: '' })
+      // 与 authStatus.ts 一致：走默认 baseURL(/api)，公开接口位于 /api/auth/status
+      const { data } = await axios.get('/auth/status')
       if (data?.code === 0) {
         passwordEnabled.value = data.data?.passwordEnabled !== false
       }

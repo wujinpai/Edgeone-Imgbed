@@ -317,6 +317,9 @@ async function proxyImageRequest(
         }
       }
 
+      // 归一化：files 通道的历史记录 URL 可能带 /{slug}/-/files/ 前缀，去掉后才是仓库内相对路径
+      urlPath = normalizeCnbAssetPath(urlPath)
+
       if (!urlPath || urlPath.includes('..') || urlPath.includes('\\') || urlPath.startsWith('/')) {
         console.error('❌ [Proxy] Invalid path:', { params: req.params, path: req.path, url: req.url })
         return res.status(400).json({ error: 'Invalid image path' })
@@ -458,6 +461,25 @@ function extractImagePath(url: string): string {
   return url
 }
 
+/**
+ * 归一化 CNB 资产 path 为「仓库内相对路径」，供直链拼接 / 记录存储 / 源文件删除统一复用。
+ *
+ * 背景：CNB 两个上传通道返回的 assets.path 形态不同——
+ *   - imgs  ：相对路径（如 2024/10/xx.webp），本函数为 no-op；
+ *   - files ：含仓库与通道前缀的全路径（如 /{slug}/-/files/<id>/<uuid>/name.docx），
+ *             若直接当相对路径再拼 `/-/files/`，会二次拼接成
+ *             /{slug}/-/files/{slug}/-/files/...，被 CNB 判为 400 Bad Request（直链打不开）。
+ * 规则：去空白与 query/hash → 去开头斜杠 → 去掉 `-/imgs/`、`-/files/` 及其之前的一切（含仓库 slug）。
+ */
+function normalizeCnbAssetPath(raw: string): string {
+  let p = String(raw || '').split(/[?#]/)[0].trim()
+  p = p.replace(/^\/+/, '')
+  // 去掉首个 `-/imgs/`、`-/files/` 及其之前的一切（即仓库 slug 前缀）；
+  // 不含该标记的路径（如 S3 的 s3-{id}/…、本就相对的 2024/x.webp）保持不变
+  p = p.replace(/^.*?-\/(?:imgs|files)\//, '')
+  return p
+}
+
 /** 服务端单文件大小上限（MB），可用环境变量 MAX_UPLOAD_MB 覆盖。
  * 前端压缩后直传产物远小于此值；该上限主要约束 GIF / "保持原图" 的大文件直传 */
 const MAX_UPLOAD_MB = (() => {
@@ -495,13 +517,15 @@ function sanitizeFilename(filename: string): string {
 }
 
 /**
- * 拼接对外直链：BASE_IMG_URL 去尾斜杠 + /api/img/ + 相对路径。
- * 图片与文件同形（代理按扩展名自动分流 CNB imgs/files 通道），故这里不做额外前缀
+ * 拼接对外直链：BASE_IMG_URL 去尾斜杠 + /api/img/ + 仓库内相对路径。
+ * CNB 的 assets.path 含 `{slug}/-/imgs|files/` 前缀（files 通道还带前导斜杠），
+ * 这里统一归一化为相对路径入库；代理侧再按扩展名自动分流 imgs/files 通道。
+ * S3 标记路径（s3-{id}/…）不含该前缀，归一化为 no-op。
  */
-function buildPublicUrl(relPath: string): string {
+function buildPublicUrl(cnbPath: string): string {
   let baseUrl = process.env.BASE_IMG_URL || ''
   if (baseUrl.endsWith('/')) baseUrl = baseUrl.slice(0, -1)
-  return `${baseUrl}/api/img/${relPath}`
+  return `${baseUrl}/api/img/${normalizeCnbAssetPath(cnbPath)}`
 }
 
 /** 上传侧允许的图片 MIME 类型（PicGo 图片集成与 multer 快筛用） */
@@ -558,7 +582,8 @@ function extractCnbImgPath(recordUrl: string): string | null {
   for (const marker of markers) {
     const idx = recordUrl.indexOf(marker)
     if (idx >= 0) {
-      const p = recordUrl.slice(idx + marker.length).split(/[?#]/)[0]
+      // 归一化：files 记录可能带 /{slug}/-/files/ 前缀，删除时必须还原为仓库内相对路径
+      const p = normalizeCnbAssetPath(recordUrl.slice(idx + marker.length))
       if (p) return p
     }
   }
@@ -585,7 +610,7 @@ async function deleteFromCnb(urls: string[], paths: string[] = []): Promise<{ ok
     targets.push(imgPath)
   }
   for (const url of urls) addTarget(extractCnbImgPath(url || ''))
-  for (const path of paths) addTarget(typeof path === 'string' ? path : null)
+  for (const path of paths) addTarget(normalizeCnbAssetPath(typeof path === 'string' ? path : '') || null)
 
   await Promise.all(
     targets.map(async (imgPath) => {
@@ -610,4 +635,4 @@ async function deleteFromCnb(urls: string[], paths: string[] = []): Promise<{ ok
   return { ok, failed, skipped }
 }
 
-export { proxyImageRequest as createProxyHandler, uploadToCnb, signAuthToken, verifyAuthToken, detectImageMime, securePasswordCompare, extractImagePath, fixMulterFilename, sanitizeFilename, buildPublicUrl, fetchCnbStorageUsage, deleteFromCnb, isValidImgPath, extractCnbImgPath, MAX_UPLOAD_MB, UPLOAD_RATE_LIMIT, ALLOWED_MIMES, IMAGE_EXT_RE, FILE_EXT_RE, PROXY_EXT_RE, isImageName, isAllowedFileName, CNB_MAX_MB, CNB_MAX_BYTES, contentDispositionAttachment }
+export { proxyImageRequest as createProxyHandler, uploadToCnb, signAuthToken, verifyAuthToken, detectImageMime, securePasswordCompare, extractImagePath, fixMulterFilename, sanitizeFilename, buildPublicUrl, fetchCnbStorageUsage, deleteFromCnb, isValidImgPath, extractCnbImgPath, normalizeCnbAssetPath, MAX_UPLOAD_MB, UPLOAD_RATE_LIMIT, ALLOWED_MIMES, IMAGE_EXT_RE, FILE_EXT_RE, PROXY_EXT_RE, isImageName, isAllowedFileName, CNB_MAX_MB, CNB_MAX_BYTES, contentDispositionAttachment }

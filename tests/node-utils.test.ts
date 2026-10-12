@@ -8,6 +8,7 @@ import {
   signAuthToken,
   verifyAuthToken,
   extractCnbImgPath,
+  normalizeCnbAssetPath,
   isValidImgPath,
 } from '../node-functions/api/_utils'
 import { verifyAuthToken as verifyAuthTokenEdge } from '../functions/image-records/_lib.js'
@@ -197,6 +198,14 @@ describe('extractCnbImgPath', () => {
   it('从原生 -/imgs/ 链接提取 imgPath', () => {
     expect(extractCnbImgPath('https://cnb.cool/user/repo/-/imgs/abc/1234.png')).toBe('abc/1234.png')
   })
+  it('从原生 -/files/ 链接提取并剥掉仓库前缀', () => {
+    expect(extractCnbImgPath('https://cnb.cool/user/repo/-/files/abc/report.docx')).toBe('abc/report.docx')
+  })
+  it('从代理链接提取 files 记录（含前导斜杠 + 仓库前缀）时归一化', () => {
+    expect(
+      extractCnbImgPath('https://cnb.jisu.cn/api/img//user/repo/-/files/abc/uuid/培训申请表.docx'),
+    ).toBe('abc/uuid/培训申请表.docx')
+  })
   it('截断查询串与锚点', () => {
     expect(extractCnbImgPath('https://img.example.com/api/img/a/b.webp?x=1#f')).toBe('a/b.webp')
   })
@@ -205,6 +214,30 @@ describe('extractCnbImgPath', () => {
   })
   it('无标记时返回 null', () => {
     expect(extractCnbImgPath('https://other.example.com/foo.png')).toBeNull()
+  })
+})
+
+describe('normalizeCnbAssetPath（CNB 资产 path 归一化为仓库内相对路径）', () => {
+  it('imgs 相对路径保持不变（no-op）', () => {
+    expect(normalizeCnbAssetPath('2024/abc.webp')).toBe('2024/abc.webp')
+  })
+  it('files 全路径（前导斜杠 + 仓库 + 通道前缀）剥前缀', () => {
+    expect(
+      normalizeCnbAssetPath('/user/repo/-/files/abc/uuid/培训申请表.docx'),
+    ).toBe('abc/uuid/培训申请表.docx')
+  })
+  it('imgs 全路径同样剥掉仓库与通道前缀', () => {
+    expect(normalizeCnbAssetPath('user/repo/-/imgs/2024/abc.webp')).toBe('2024/abc.webp')
+  })
+  it('S3 标记路径不含通道标记，保持不变', () => {
+    expect(normalizeCnbAssetPath('s3-abc123/1729-key-file.png')).toBe('s3-abc123/1729-key-file.png')
+  })
+  it('截断查询串与锚点、去空白', () => {
+    expect(normalizeCnbAssetPath('  2024/abc.webp?v=1#x  ')).toBe('2024/abc.webp')
+  })
+  it('空值返回空串', () => {
+    expect(normalizeCnbAssetPath('')).toBe('')
+    expect(normalizeCnbAssetPath(undefined as unknown as string)).toBe('')
   })
 })
 

@@ -478,6 +478,18 @@ const CNB_LIST_PAGE_SIZE = 100
 const CNB_LIST_MAX_PAGES = 30 // 单次扫描上限 3000 个资产，超出标记 truncated
 const CNB_LIST_TIMEOUT_MS = 10000
 
+// 与 node-functions/api/_utils.ts 的 normalizeCnbAssetPath 同规则：
+// CNB 两个上传通道返回的 path 形态不同——imgs 为相对路径（2024/x.webp），
+// files 为含仓库与通道前缀的全路径（/{slug}/-/files/<id>/<uuid>/name.docx）。
+// 统一归一化为「仓库内相对路径」：去 query/hash、开头斜杠，以及 `-/imgs/`、`-/files/`
+// 及其之前的一切（含仓库 slug），否则删除/拼接会二次前缀导致 400。
+function normalizeCnbPath(raw) {
+  let p = String(raw || '').split(/[?#]/)[0].trim()
+  p = p.replace(/^\/+/, '')
+  p = p.replace(/^.*?-\/(?:imgs|files)\//, '')
+  return p || null
+}
+
 // 与 node-functions/api/_utils.ts 的 extractCnbImgPath 同规则：兼容 /api/img/ 与原生 -/imgs/、-/files/ 链接
 function cnbImgPathOf(recordUrl) {
   const raw = String(recordUrl || '')
@@ -485,25 +497,16 @@ function cnbImgPathOf(recordUrl) {
   for (const marker of markers) {
     const idx = raw.indexOf(marker)
     if (idx >= 0) {
-      const p = raw.slice(idx + marker.length).split(/[?#]/)[0]
+      const p = normalizeCnbPath(raw.slice(idx + marker.length))
       if (p) return p
     }
   }
   return null
 }
 
-// 平台资产的 path → imgPath（可能带 -/imgs/、-/files/ 前缀，也可能已是裸路径）
+// 平台资产的 path → imgPath（可能带仓库/通道前缀，也可能已是裸路径）
 function normalizeAssetPath(assetPath) {
-  const raw = String(assetPath || '')
-  for (const marker of ['-/imgs/', '-/files/']) {
-    const idx = raw.indexOf(marker)
-    if (idx >= 0) {
-      const p = raw.slice(idx + marker.length).split(/[?#]/)[0]
-      return p || null
-    }
-  }
-  const p = raw.split(/[?#]/)[0]
-  return p || null
+  return normalizeCnbPath(assetPath)
 }
 
 // 分页拉取仓库全部平台资产：{ ok, assets?, others?, truncated?, reason? }

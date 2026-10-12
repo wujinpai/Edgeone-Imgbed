@@ -18,6 +18,7 @@ import {
   PROXY_EXT_RE,
   isImageName,
   isAllowedFileName,
+  normalizeCnbAssetPath,
   CNB_MAX_MB,
   CNB_MAX_BYTES,
 } from './_utils'
@@ -133,7 +134,9 @@ app.use((req, res, next) => {
       // 多存储分流：按路径标记路由到 CNB 或对应 S3 桶（标记规则见 _storage.ts）
       const fullPath = req.path || req.url || ''
       const match = fullPath.match(/\/img\/(.+)/)
-      const urlPath = match ? match[1] : ''
+      let urlPath = match ? match[1] : ''
+      // 归一化：files 通道的历史直链带 /{slug}/-/files/ 前缀，去掉后才是仓库内相对路径
+      urlPath = normalizeCnbAssetPath(urlPath)
       if (!urlPath || urlPath.includes('..') || urlPath.includes('\\') || urlPath.startsWith('/')) {
         return res.status(400).json({ error: 'Invalid image path' })
       }

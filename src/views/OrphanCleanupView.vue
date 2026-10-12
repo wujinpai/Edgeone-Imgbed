@@ -2,7 +2,6 @@
 import { computed, ref } from 'vue'
 import axios from '@/utils/axios'
 import { SearchCode, Trash2 } from 'lucide-vue-next'
-import AppShell from '@/components/layout/AppShell.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { useStorageUsage } from '@/composables/useStorageUsage'
 import { formatCompactSize } from '@/utils/format'
@@ -154,173 +153,215 @@ const purgeOrphans = async () => {
 </script>
 
 <template>
-  <AppShell>
-    <div class="flex flex-col gap-6">
-      <div>
-        <h2 class="flex items-center gap-2.5 text-2xl font-bold text-gray-900 dark:text-white">
-          <SearchCode class="h-6 w-6 text-indigo-600 dark:text-indigo-400" />
-          孤儿清理
-        </h2>
-        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">扫描并清理仓库中已无记录引用的图片（孤儿文件）</p>
+  <div class="flex flex-col gap-6">
+    <div>
+      <h2 class="flex items-center gap-2.5 text-2xl font-bold text-gray-900 dark:text-white">
+        <SearchCode class="h-6 w-6 text-indigo-600 dark:text-indigo-400" />
+        孤儿清理
+      </h2>
+      <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+        扫描并清理仓库中已无记录引用的图片（孤儿文件）
+      </p>
+    </div>
+
+    <!-- 孤儿文件扫描：CNB 平台资产清单 vs 上传记录对比 -->
+    <div class="card p-6">
+      <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
+        <div class="flex items-start gap-3">
+          <div
+            class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-50 text-amber-500 dark:bg-amber-900/30 dark:text-amber-400"
+          >
+            <SearchCode class="h-5 w-5" />
+          </div>
+          <div class="min-w-0">
+            <p class="whitespace-nowrap text-sm font-bold text-gray-900 dark:text-white">
+              孤儿文件扫描
+            </p>
+            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+              对比 CNB
+              平台资产清单与上传记录（含回收站），找出仓库中已无记录引用的图片；只读不删，清理前二次确认（仅覆盖
+              CNB 存储，S3 桶暂不支持）
+            </p>
+          </div>
+        </div>
+        <div class="flex shrink-0 items-center gap-2">
+          <!-- 结果排序切换 -->
+          <div
+            v-if="scanState === 'done' && orphans.length > 0"
+            class="flex h-9 items-center gap-0.5 rounded-xl border border-gray-200 bg-white p-1 dark:border-gray-700 dark:bg-gray-800"
+          >
+            <button
+              @click="orphanSort = 'time'"
+              class="rounded-lg px-2.5 text-xs font-bold transition-colors"
+              :class="
+                orphanSort === 'time'
+                  ? 'bg-indigo-50 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-300'
+                  : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-200'
+              "
+            >
+              时间
+            </button>
+            <button
+              @click="orphanSort = 'size'"
+              class="rounded-lg px-2.5 text-xs font-bold transition-colors"
+              :class="
+                orphanSort === 'size'
+                  ? 'bg-indigo-50 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-300'
+                  : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-200'
+              "
+            >
+              大小
+            </button>
+          </div>
+          <button
+            @click="scanOrphans"
+            :disabled="scanState === 'scanning'"
+            class="flex h-9 items-center gap-1.5 rounded-xl px-4 text-xs font-bold transition-all disabled:cursor-not-allowed disabled:opacity-60"
+            :class="
+              scanState === 'scanning'
+                ? 'bg-gray-100 text-gray-400 dark:bg-gray-800 dark:text-gray-500'
+                : 'brand-gradient text-white shadow-md shadow-indigo-500/25 hover:opacity-90'
+            "
+          >
+            {{ scanState === 'scanning' ? '扫描中…' : '扫描' }}
+          </button>
+        </div>
       </div>
 
-      <!-- 孤儿文件扫描：CNB 平台资产清单 vs 上传记录对比 -->
-      <div class="card p-6">
-        <div class="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between sm:gap-4">
-          <div class="flex items-start gap-3">
-            <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-50 text-amber-500 dark:bg-amber-900/30 dark:text-amber-400">
-              <SearchCode class="h-5 w-5" />
+      <!-- 扫描失败 -->
+      <p
+        v-if="scanState === 'error'"
+        class="mt-3 text-xs font-semibold text-red-500 dark:text-red-400"
+      >
+        {{ scanMsg }}
+      </p>
+
+      <!-- 扫描结果 -->
+      <div v-if="scanState === 'done'" class="mt-4">
+        <p class="text-xs font-semibold text-gray-600 dark:text-gray-300">
+          已扫描 {{ scanMeta?.scanned || 0 }} 个平台资产
+          <template v-if="scanMeta?.otherTypes">
+            （{{ scanMeta.otherTypes }} 个非图片附件不计入）
+          </template>
+          ，发现
+          <span
+            :class="
+              orphans.length > 0
+                ? 'text-amber-600 dark:text-amber-400'
+                : 'text-emerald-600 dark:text-emerald-400'
+            "
+          >
+            {{ orphans.length }} 个孤儿文件
+          </span>
+          <template v-if="hiddenThumbCount > 0"
+            >（其中 {{ hiddenThumbCount }} 个为缩略图，随主图清理）</template
+          >
+          <template v-if="orphans.length > 0"
+            >，共 {{ formatCompactSize(orphanTotalSize) }}</template
+          >
+        </p>
+        <p v-if="scanMeta?.truncated" class="mt-1 text-xs text-amber-600 dark:text-amber-400">
+          资产数量超过单次扫描上限，结果可能不完整，可多次执行清理后重新扫描
+        </p>
+
+        <!-- 孤儿卡片网格：样式与图片列表一致 -->
+        <div
+          v-if="displayOrphans.length > 0"
+          class="mt-3 grid max-h-[26rem] grid-cols-2 gap-3 overflow-y-auto sm:gap-4 lg:grid-cols-3 2xl:grid-cols-4"
+        >
+          <div
+            v-for="orphan in displayOrphans"
+            :key="orphan.path"
+            class="card group overflow-hidden"
+          >
+            <div class="relative aspect-[4/3] overflow-hidden bg-gray-100 dark:bg-gray-800">
+              <!-- 勾选清理 -->
+              <label
+                class="absolute left-2.5 top-2.5 z-10 flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg bg-white/90 shadow-sm backdrop-blur transition-opacity dark:bg-gray-900/80"
+                :class="
+                  isSelectedOrphan(orphan.path)
+                    ? 'opacity-100 ring-2 ring-indigo-500'
+                    : 'opacity-80 group-hover:opacity-100'
+                "
+                @click.stop
+                title="勾选后可只清理选中项"
+              >
+                <input
+                  type="checkbox"
+                  :checked="isSelectedOrphan(orphan.path)"
+                  @change="toggleOrphan(orphan.path)"
+                  class="h-4 w-4 cursor-pointer accent-indigo-600"
+                />
+              </label>
+              <a
+                :href="orphanUrl(orphan)"
+                target="_blank"
+                rel="noopener"
+                class="block h-full w-full cursor-zoom-in"
+                title="点击查看原图"
+              >
+                <img
+                  :src="orphanUrl(orphan)"
+                  :alt="orphanName(orphan)"
+                  loading="lazy"
+                  decoding="async"
+                  class="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                />
+              </a>
+              <span
+                class="absolute bottom-2.5 left-2.5 rounded-md bg-black/45 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white backdrop-blur-sm"
+              >
+                {{ orphanExt(orphan) }}
+              </span>
             </div>
-            <div class="min-w-0">
-              <p class="whitespace-nowrap text-sm font-bold text-gray-900 dark:text-white">孤儿文件扫描</p>
-              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                对比 CNB 平台资产清单与上传记录（含回收站），找出仓库中已无记录引用的图片；只读不删，清理前二次确认（仅覆盖 CNB 存储，S3 桶暂不支持）
+            <div class="p-3">
+              <p
+                class="truncate text-xs font-semibold text-gray-800 sm:text-sm dark:text-gray-100"
+                :title="orphan.path"
+              >
+                {{ orphanName(orphan) }}
+              </p>
+              <p
+                class="mt-1 flex items-center gap-1.5 text-[11px] tabular-nums text-gray-400 dark:text-gray-500"
+              >
+                <span>{{ formatCompactSize(orphan.size) }}</span>
+                <span>{{ orphanDate(orphan) }}</span>
               </p>
             </div>
           </div>
-          <div class="flex shrink-0 items-center gap-2">
-            <!-- 结果排序切换 -->
-            <div
-              v-if="scanState === 'done' && orphans.length > 0"
-              class="flex h-9 items-center gap-0.5 rounded-xl border border-gray-200 bg-white p-1 dark:border-gray-700 dark:bg-gray-800"
-            >
-              <button
-                @click="orphanSort = 'time'"
-                class="rounded-lg px-2.5 text-xs font-bold transition-colors"
-                :class="orphanSort === 'time' ? 'bg-indigo-50 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-300' : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-200'"
-              >
-                时间
-              </button>
-              <button
-                @click="orphanSort = 'size'"
-                class="rounded-lg px-2.5 text-xs font-bold transition-colors"
-                :class="orphanSort === 'size' ? 'bg-indigo-50 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-300' : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-200'"
-              >
-                大小
-              </button>
-            </div>
-            <button
-              @click="scanOrphans"
-              :disabled="scanState === 'scanning'"
-              class="flex h-9 items-center gap-1.5 rounded-xl px-4 text-xs font-bold transition-all disabled:cursor-not-allowed disabled:opacity-60"
-              :class="
-                scanState === 'scanning'
-                  ? 'bg-gray-100 text-gray-400 dark:bg-gray-800 dark:text-gray-500'
-                  : 'brand-gradient text-white shadow-md shadow-indigo-500/25 hover:opacity-90'
-              "
-            >
-              {{ scanState === 'scanning' ? '扫描中…' : '扫描' }}
-            </button>
-          </div>
         </div>
 
-        <!-- 扫描失败 -->
-        <p v-if="scanState === 'error'" class="mt-3 text-xs font-semibold text-red-500 dark:text-red-400">
-          {{ scanMsg }}
-        </p>
-
-        <!-- 扫描结果 -->
-        <div v-if="scanState === 'done'" class="mt-4">
-          <p class="text-xs font-semibold text-gray-600 dark:text-gray-300">
-            已扫描 {{ scanMeta?.scanned || 0 }} 个平台资产
-            <template v-if="scanMeta?.otherTypes">
-              （{{ scanMeta.otherTypes }} 个非图片附件不计入）
-            </template>
-            ，发现
-            <span :class="orphans.length > 0 ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'">
-              {{ orphans.length }} 个孤儿文件
-            </span>
-            <template v-if="hiddenThumbCount > 0">（其中 {{ hiddenThumbCount }} 个为缩略图，随主图清理）</template>
-            <template v-if="orphans.length > 0">，共 {{ formatCompactSize(orphanTotalSize) }}</template>
-          </p>
-          <p v-if="scanMeta?.truncated" class="mt-1 text-xs text-amber-600 dark:text-amber-400">
-            资产数量超过单次扫描上限，结果可能不完整，可多次执行清理后重新扫描
-          </p>
-
-          <!-- 孤儿卡片网格：样式与图片列表一致 -->
-          <div
-            v-if="displayOrphans.length > 0"
-            class="mt-3 grid max-h-[26rem] grid-cols-2 gap-3 overflow-y-auto sm:gap-4 lg:grid-cols-3 2xl:grid-cols-4"
+        <div v-if="orphans.length > 0" class="mt-3 flex flex-wrap justify-end gap-2">
+          <button
+            v-if="selectedOrphanCount > 0"
+            @click="purgeConfirm = 'selected'"
+            :disabled="orphanPurging"
+            class="flex h-9 items-center gap-1.5 rounded-xl border border-red-200 bg-white px-4 text-xs font-bold text-red-500 transition-all hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-500/30 dark:bg-gray-900 dark:text-red-400 dark:hover:bg-red-500/10"
           >
-            <div v-for="orphan in displayOrphans" :key="orphan.path" class="card group overflow-hidden">
-              <div class="relative aspect-[4/3] overflow-hidden bg-gray-100 dark:bg-gray-800">
-                <!-- 勾选清理 -->
-                <label
-                  class="absolute left-2.5 top-2.5 z-10 flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg bg-white/90 shadow-sm backdrop-blur transition-opacity dark:bg-gray-900/80"
-                  :class="isSelectedOrphan(orphan.path) ? 'opacity-100 ring-2 ring-indigo-500' : 'opacity-80 group-hover:opacity-100'"
-                  @click.stop
-                  title="勾选后可只清理选中项"
-                >
-                  <input
-                    type="checkbox"
-                    :checked="isSelectedOrphan(orphan.path)"
-                    @change="toggleOrphan(orphan.path)"
-                    class="h-4 w-4 cursor-pointer accent-indigo-600"
-                  />
-                </label>
-                <a
-                  :href="orphanUrl(orphan)"
-                  target="_blank"
-                  rel="noopener"
-                  class="block h-full w-full cursor-zoom-in"
-                  title="点击查看原图"
-                >
-                  <img
-                    :src="orphanUrl(orphan)"
-                    :alt="orphanName(orphan)"
-                    loading="lazy"
-                    decoding="async"
-                    class="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-                  />
-                </a>
-                <span class="absolute bottom-2.5 left-2.5 rounded-md bg-black/45 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white backdrop-blur-sm">
-                  {{ orphanExt(orphan) }}
-                </span>
-              </div>
-              <div class="p-3">
-                <p class="truncate text-xs font-semibold text-gray-800 sm:text-sm dark:text-gray-100" :title="orphan.path">
-                  {{ orphanName(orphan) }}
-                </p>
-                <p class="mt-1 flex items-center gap-1.5 text-[11px] tabular-nums text-gray-400 dark:text-gray-500">
-                  <span>{{ formatCompactSize(orphan.size) }}</span>
-                  <span>{{ orphanDate(orphan) }}</span>
-                </p>
-              </div>
-            </div>
-          </div>
-
-          <div v-if="orphans.length > 0" class="mt-3 flex flex-wrap justify-end gap-2">
-            <button
-              v-if="selectedOrphanCount > 0"
-              @click="purgeConfirm = 'selected'"
-              :disabled="orphanPurging"
-              class="flex h-9 items-center gap-1.5 rounded-xl border border-red-200 bg-white px-4 text-xs font-bold text-red-500 transition-all hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-500/30 dark:bg-gray-900 dark:text-red-400 dark:hover:bg-red-500/10"
-            >
-              <Trash2 class="h-3.5 w-3.5" />
-              清理选中 ({{ selectedOrphanCount }})
-            </button>
-            <button
-              @click="purgeConfirm = 'all'"
-              :disabled="orphanPurging"
-              class="flex h-9 items-center gap-1.5 rounded-xl bg-red-500 px-4 text-xs font-bold text-white shadow-md shadow-red-500/20 transition-all hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              <Trash2 class="h-3.5 w-3.5" />
-              {{ orphanPurging ? '清理中…' : '清理全部孤儿文件' }}
-            </button>
-          </div>
+            <Trash2 class="h-3.5 w-3.5" />
+            清理选中 ({{ selectedOrphanCount }})
+          </button>
+          <button
+            @click="purgeConfirm = 'all'"
+            :disabled="orphanPurging"
+            class="flex h-9 items-center gap-1.5 rounded-xl bg-red-500 px-4 text-xs font-bold text-white shadow-md shadow-red-500/20 transition-all hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Trash2 class="h-3.5 w-3.5" />
+            {{ orphanPurging ? '清理中…' : '清理全部孤儿文件' }}
+          </button>
         </div>
       </div>
-
-      <!-- 孤儿清理确认弹窗（替代原生 confirm，与全站弹窗风格统一） -->
-      <ConfirmDialog
-        :open="purgeConfirm !== null"
-        :title="`将永久删除 CNB 上的 ${purgeConfirm === 'selected' ? selectedOrphanCount : orphans.length} 个孤儿文件？`"
-        description="删除不可恢复；勾选主图清理时会连带其缩略图。"
-        confirm-text="删除"
-        :loading="orphanPurging"
-        @confirm="purgeOrphans"
-        @cancel="purgeConfirm = null"
-      />
     </div>
-  </AppShell>
+
+    <!-- 孤儿清理确认弹窗（替代原生 confirm，与全站弹窗风格统一） -->
+    <ConfirmDialog
+      :open="purgeConfirm !== null"
+      :title="`将永久删除 CNB 上的 ${purgeConfirm === 'selected' ? selectedOrphanCount : orphans.length} 个孤儿文件？`"
+      description="删除不可恢复；勾选主图清理时会连带其缩略图。"
+      confirm-text="删除"
+      :loading="orphanPurging"
+      @confirm="purgeOrphans"
+      @cancel="purgeConfirm = null"
+    />
+  </div>
 </template>

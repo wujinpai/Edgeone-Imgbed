@@ -383,6 +383,8 @@ async function purgeExpired(records, env = null, cnbCleanup = false) {
   const fullyPurged = expired.filter((r) =>
     recordSources(r).every((x) => (x.kind === 'cnb' ? okCnb : okS3).has(x.path)),
   )
+  // 本轮没有任何记录被彻底清除（如源文件删除被节流/失败）→ 不做多余的索引回写
+  if (fullyPurged.length === 0) return records
   for (let i = 0; i < fullyPurged.length; i += 100) {
     await Promise.all(
       fullyPurged.slice(i, i + 100).map((r) => IMG_RECORDS_KV.delete(recordKeyOf(safeIdOf(r.id)))),

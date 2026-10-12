@@ -2,39 +2,66 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { isTokenLive } from '@/utils/authToken'
 import { isPasswordEnabled, loadAuthStatus } from './authStatus'
 
+// 各页面的懒加载器独立命名：既供路由使用，也供 prefetchRouteChunks 预取
+const HomeView = () => import('../views/HomeView.vue')
+const AdminView = () => import('../views/AdminView.vue')
+const LoginView = () => import('../views/LoginView.vue')
+const SettingsView = () => import('../views/SettingsView.vue')
+const OrphanCleanupView = () => import('../views/OrphanCleanupView.vue')
+
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     {
       path: '/',
       name: 'home',
-      component: () => import('../views/HomeView.vue'),
+      component: HomeView,
     },
     {
       path: '/admin',
       name: 'admin',
-      component: () => import('../views/AdminView.vue'),
+      component: AdminView,
     },
     // [新增] 登录页路由
     {
       path: '/login',
       name: 'login',
-      component: () => import('../views/LoginView.vue'),
+      component: LoginView,
     },
     // [新增] 侧边栏占位页路由
     {
       path: '/settings',
       name: 'settings',
-      component: () => import('../views/SettingsView.vue'),
+      component: SettingsView,
     },
     // 孤儿文件扫描与清理
     {
       path: '/orphan',
       name: 'orphan',
-      component: () => import('../views/OrphanCleanupView.vue'),
+      component: OrphanCleanupView,
     },
   ],
 })
+
+// 首屏渲染完成后，在浏览器空闲时预加载各页面 chunk：
+// 懒加载路由首次点击才现下载解析（AdminView/HomeView 各 ~17KB gzip），
+// 预取后首次点导航栏即为秒开。登录页不预取（仅退出流程用，体积小）。
+export function prefetchRouteChunks(): void {
+  if (typeof window === 'undefined') return
+  const load = () => {
+    void HomeView()
+    void AdminView()
+    void SettingsView()
+    void OrphanCleanupView()
+  }
+  const ric = (
+    window as unknown as {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number
+    }
+  ).requestIdleCallback
+  if (typeof ric === 'function') ric(load, { timeout: 2000 })
+  else window.setTimeout(load, 1200)
+}
 
 // [新增] 全局前置守卫
 router.beforeEach(async (to, from, next) => {

@@ -46,8 +46,8 @@ const schedulePush = () => {
   pushTimer = setTimeout(pushNow, 600)
 }
 
-// watch 必须注册在模块顶层（组件 effect scope 之外）：AppShell 随视图切换反复卸载，
-// 若在组件生命周期内注册，导航时会随组件 scope.stop() 一并销毁，云端回写从此静默失效
+// watch 必须注册在模块顶层（组件 effect scope 之外）：离开设置页（或任何承载方）时组件 scope.stop()
+// 会连同销毁组件内注册的 watch，云端回写从此静默失效
 watch([settings, theme], schedulePush, { deep: true })
 
 export function startCloudSettingsSync() {

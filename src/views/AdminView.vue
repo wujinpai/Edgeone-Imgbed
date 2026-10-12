@@ -41,7 +41,6 @@ import { useUploadSettings } from '@/composables/useUploadSettings'
 import { flushPendingRecords } from '@/utils/pendingRecords'
 import { useGlobalStats } from '@/composables/useGlobalStats'
 import { useStorageUsage } from '@/composables/useStorageUsage'
-import AppShell from '@/components/layout/AppShell.vue'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import PaginationBar from '@/components/PaginationBar.vue'
 
@@ -62,7 +61,16 @@ const { settings } = useUploadSettings()
 const route = useRoute()
 const router = useRouter()
 
-const list = ref<ImageRecord[]>([])
+// 列表快照缓存：按「列表 / 回收站」分键。切导航时先用缓存秒开、再后台静默刷新，
+// 避免每次点导航都等一次全量请求、并闪一次骨架屏（首次访问某视图仍需拉一次）
+type ListStats = { count: number; totalSize: number; trashed: number; trashedSize?: number }
+type ListSnapshot = { records: ImageRecord[]; stats: ListStats | null }
+const listCache: Record<'normal' | 'trash', ListSnapshot | null> = { normal: null, trash: null }
+const viewKeyOf = (trash: boolean): 'normal' | 'trash' => (trash ? 'trash' : 'normal')
+
+// 首帧直接用缓存渲染（再次进入秒开、无空态闪烁）；无缓存时才走骨架屏
+const initialCache = listCache[viewKeyOf(route.query.view === 'trash')]
+const list = ref<ImageRecord[]>(initialCache?.records ?? [])
 const loading = ref(false)
 // 回收站是 /admin 的一种视图（/admin?view=trash），与侧栏「回收站」导航项联动
 const trashMode = computed({
@@ -73,7 +81,14 @@ const trashMode = computed({
     router.replace({ path: '/admin', query: buildQuery(val) }).catch(() => {})
   },
 })
-const stats = ref<{ count: number; totalSize: number; trashed: number; trashedSize?: number } | null>(null)
+const stats = ref<ListStats | null>(initialCache?.stats ?? null)
+
+// 列表请求参数：视图（回收站）+ 统计 + 时区（让服务端"今日上传"按本机 0 点切分）
+const listParams = (key: 'normal' | 'trash', withStats = true) => ({
+  ...(key === 'trash' ? { trash: 1 } : {}),
+  ...(withStats ? { stats: 1 } : {}),
+  tz: new Date().getTimezoneOffset(),
+})
 
 // 前端搜索 + 类型筛选 + 大小筛选 + 排序 + 分页（数据已整表拉取，不再额外请求）
 const keyword = ref('')
@@ -96,7 +111,9 @@ const timeFilterOptions: Array<{ value: TimeFilter; label: string }> = [
   { value: '7d', label: '近 7 天' },
   { value: '30d', label: '近 30 天' },
 ]
-const timeLabel = computed(() => timeFilterOptions.find((o) => o.value === timeFilter.value)?.label || '全部')
+const timeLabel = computed(
+  () => timeFilterOptions.find((o) => o.value === timeFilter.value)?.label || '全部',
+)
 const showTimeMenu = ref(false)
 const localMidnight = () => {
   const d = new Date()
@@ -104,10 +121,17 @@ const localMidnight = () => {
   return d.getTime()
 }
 const hasActiveFilters = computed(
-  () => !!keyword.value || typeFilter.value !== 'all' || sizeFilter.value !== 'all' || timeFilter.value !== 'all',
+  () =>
+    !!keyword.value ||
+    typeFilter.value !== 'all' ||
+    sizeFilter.value !== 'all' ||
+    timeFilter.value !== 'all',
 )
 const activeFilterCount = computed(
-  () => [typeFilter.value !== 'all', sizeFilter.value !== 'all', timeFilter.value !== 'all'].filter(Boolean).length,
+  () =>
+    [typeFilter.value !== 'all', sizeFilter.value !== 'all', timeFilter.value !== 'all'].filter(
+      Boolean,
+    ).length,
 )
 const clearFilters = () => {
   keyword.value = ''
@@ -276,7 +300,9 @@ const filteredList = computed(() => {
   }
   if (timeFilter.value !== 'all') {
     const start =
-      timeFilter.value === 'today' ? localMidnight() : Date.now() - (timeFilter.value === '7d' ? 7 : 30) * 86400000
+      timeFilter.value === 'today'
+        ? localMidnight()
+        : Date.now() - (timeFilter.value === '7d' ? 7 : 30) * 86400000
     base = base.filter((item) => item.createdAt >= start)
   }
   const dir = sortDir.value === 'asc' ? 1 : -1
@@ -287,7 +313,9 @@ const filteredList = computed(() => {
   })
 })
 
-const totalPages = computed(() => Math.max(1, Math.ceil(filteredList.value.length / pageSize.value)))
+const totalPages = computed(() =>
+  Math.max(1, Math.ceil(filteredList.value.length / pageSize.value)),
+)
 const pagedList = computed(() =>
   filteredList.value.slice((page.value - 1) * pageSize.value, page.value * pageSize.value),
 )
@@ -347,6 +375,7 @@ const highlightName = (name: string): Array<{ text: string; hit: boolean }> => {
 // 「新」角标：近 5 分钟内上传的记录（定时刷新让角标到期自动消失）
 const nowTick = ref(Date.now())
 let tickTimer: number | null = null
+let warmTimer: number | null = null
 const isNewRecord = (item: ImageRecord) => nowTick.value - Number(item.createdAt) < 5 * 60 * 1000
 
 // 回收站剩余保留天数（30 天大限）
@@ -364,7 +393,9 @@ const daysLeftClass = (deletedAt: number) => {
 const { stats: globalStats } = useGlobalStats()
 // 彻底删除/恢复后强制刷新侧栏存储卡（refresh=1 绕过服务端 10 分钟缓存，张数立即回落）
 const { fetchUsage } = useStorageUsage()
-const syncGlobalStats = () => { if (stats.value) globalStats.value = stats.value }
+const syncGlobalStats = () => {
+  if (stats.value) globalStats.value = stats.value
+}
 
 // 回收站页头提示：删除仅移除记录，软删除原图仍占用 CNB 存储；并给出最早一批的清理倒计时
 const trashFootprintText = computed(() => {
@@ -376,14 +407,22 @@ const trashFootprintText = computed(() => {
   return `${parts.length > 0 ? parts.join('，') + '；' : ''}30 天后自动清除并联动删除源文件，期间可在此恢复`
 })
 
-// 列表与统计一次请求拿全（KV 侧单次全表扫描 + ?stats=1 顺带统计）；quiet 静默刷新，不闪骨架屏
+// 列表与统计一次请求拿全（KV 侧快路径读索引 + ?stats=1 顺带统计）；quiet 静默刷新，不闪骨架屏。
+// 导航/首次加载（quiet=false）命中缓存时：先渲染缓存并降级为后台静默刷新——切视图即时可见、不闪骨架
 const fetchList = async (quiet = false) => {
+  const key = viewKeyOf(trashMode.value)
+  const cached = !quiet ? listCache[key] : null
+  if (cached) {
+    list.value = cached.records
+    stats.value = cached.stats
+    syncGlobalStats()
+    quiet = true
+  }
   if (!quiet) loading.value = true
   try {
     const { data } = await axios.get('/image-records', {
       baseURL: '',
-      // tz：让服务端"今日上传"按本机时区 0 点切分（边缘函数跑在 UTC）
-      params: { ...(trashMode.value ? { trash: 1 } : {}), stats: 1, tz: new Date().getTimezoneOffset() },
+      params: listParams(key),
     })
     if (data.code === 0) {
       // 兼容旧形状：纯数组（无统计）；新形状：{ records, stats }
@@ -394,12 +433,29 @@ const fetchList = async (quiet = false) => {
         stats.value = data.data.stats ?? null
         syncGlobalStats()
       }
+      listCache[key] = { records: list.value, stats: stats.value }
     }
   } catch (e) {
     if (!quiet) toast.error('获取列表失败')
   } finally {
     if (!quiet) loading.value = false
   }
+}
+
+// 预取「另一视图」：空闲时后台拉一次写入缓存（不动当前列表），之后首次点该导航即命中缓存秒开
+const warmOtherView = () => {
+  const key = viewKeyOf(!trashMode.value)
+  if (listCache[key]) return
+  axios
+    .get('/image-records', { baseURL: '', params: listParams(key) })
+    .then(({ data }) => {
+      if (data.code === 0 && !Array.isArray(data.data)) {
+        listCache[key] = { records: data.data.records ?? [], stats: data.data.stats ?? null }
+      }
+    })
+    .catch(() => {
+      // 预取失败不影响主流程，用户点过去时自会重新拉取
+    })
 }
 
 // 应用内删除确认（回收站彻底删除专用，组件为 ConfirmDialog）：单条 / 批量共用一个弹窗
@@ -465,7 +521,7 @@ const moveFocus = (delta: number) => {
 }
 
 const focusedItem = computed(() =>
-  focusIndex.value >= 0 ? filteredList.value[focusIndex.value] ?? null : null,
+  focusIndex.value >= 0 ? (filteredList.value[focusIndex.value] ?? null) : null,
 )
 
 // Escape 关闭弹层（lightbox 优先于删除确认；删除请求进行中不响应）
@@ -644,7 +700,8 @@ const restoreRecords = async (items: ImageRecord[], successMsg: string) => {
 }
 
 // 查询串组装 ?id=a&id=b（与 KV 侧 getAll('id') 批量路径配套）
-const idsParams = (items: ImageRecord[]) => items.map((i) => `id=${encodeURIComponent(i.id)}`).join('&')
+const idsParams = (items: ImageRecord[]) =>
+  items.map((i) => `id=${encodeURIComponent(i.id)}`).join('&')
 
 const restoreBatch = async () => {
   const items = [...selectedList.value]
@@ -720,7 +777,10 @@ const exitSelectMode = () => {
 // 全选（作用于当前筛选+排序后的完整列表，跨分页生效）
 const allSelected = computed(() => {
   void selectionVersion.value
-  return filteredList.value.length > 0 && filteredList.value.every((item) => selectedIds.value.has(item.id))
+  return (
+    filteredList.value.length > 0 &&
+    filteredList.value.every((item) => selectedIds.value.has(item.id))
+  )
 })
 
 // 两档全选：仅本页 / 全部筛选结果（键盘 Ctrl/Cmd+A = 全部切换）
@@ -855,7 +915,8 @@ const handleBatchDelete = async () => {
   if (batchDeleting.value || selectedList.value.length === 0) return
   batchDeleting.value = true
   const targets = [...selectedList.value]
-  const lightboxWasOpen = !!lightboxItem.value && targets.some((t) => t.id === lightboxItem.value!.id)
+  const lightboxWasOpen =
+    !!lightboxItem.value && targets.some((t) => t.id === lightboxItem.value!.id)
   const prevLightboxIndex = lightboxIndex.value
   const purgeSuffix = trashMode.value ? '&purge=1' : ''
   // 分块提交（≤40 id/批）："全选全部"可达数百条，单条 URL 超长会整批 4xx
@@ -867,7 +928,9 @@ const handleBatchDelete = async () => {
     let sourceFailed = 0
     let reqFailed = false
     for (const chunk of chunks) {
-      const { data } = await axios.delete(`/image-records?${idsParams(chunk)}${purgeSuffix}`, { baseURL: '' })
+      const { data } = await axios.delete(`/image-records?${idsParams(chunk)}${purgeSuffix}`, {
+        baseURL: '',
+      })
       if (data.code !== 0) {
         reqFailed = true
         fail += chunk.length
@@ -960,7 +1023,8 @@ const handleImportFile = async (e: Event) => {
       return
     }
     // url 白名单：http(s) 或 / 开头的站内路径；阻断 javascript: 等存储型 href 注入
-    const urlOk = (u: unknown) => typeof u === 'string' && (/^https?:\/\//i.test(u) || u.startsWith('/'))
+    const urlOk = (u: unknown) =>
+      typeof u === 'string' && (/^https?:\/\//i.test(u) || u.startsWith('/'))
     const items = parsed.filter((r) => r && r.id && urlOk(r.url) && r.createdAt)
     if (items.length === 0) {
       toast.error('导入失败：备份文件中没有有效记录')
@@ -968,7 +1032,11 @@ const handleImportFile = async (e: Event) => {
     }
     let ok = 0
     for (let i = 0; i < items.length; i += 50) {
-      const { data } = await axios.post('/image-records', { records: items.slice(i, i + 50) }, { baseURL: '' })
+      const { data } = await axios.post(
+        '/image-records',
+        { records: items.slice(i, i + 50) },
+        { baseURL: '' },
+      )
       if (data.code !== 0) {
         toast.error(data.msg || '导入失败')
         return
@@ -991,7 +1059,15 @@ let copyFormatTimer: ReturnType<typeof setTimeout> | null = null
 const copyFormat = async (item: ImageRecord, key: 'url' | 'markdown' | 'html' | 'bbcode') => {
   const fmt = buildFormats(item, item.url).find((f) => f.key === key)
   if (fmt) {
-    await copyText(fmt.value, { url: '链接已复制', markdown: 'Markdown 已复制', html: 'HTML 已复制', bbcode: 'BBCode 已复制' }[key])
+    await copyText(
+      fmt.value,
+      {
+        url: '链接已复制',
+        markdown: 'Markdown 已复制',
+        html: 'HTML 已复制',
+        bbcode: 'BBCode 已复制',
+      }[key],
+    )
     copiedRecordId.value = { id: item.id, key }
     if (copyFormatTimer) clearTimeout(copyFormatTimer)
     copyFormatTimer = setTimeout(() => {
@@ -1001,7 +1077,12 @@ const copyFormat = async (item: ImageRecord, key: 'url' | 'markdown' | 'html' | 
 }
 
 // 预览底部操作条的复制按钮（四种格式）
-const lightboxCopyFormats: Array<{ key: 'url' | 'markdown' | 'html' | 'bbcode'; label: string; title: string; icon: Component }> = [
+const lightboxCopyFormats: Array<{
+  key: 'url' | 'markdown' | 'html' | 'bbcode'
+  label: string
+  title: string
+  icon: Component
+}> = [
   { key: 'url', label: '直链', title: '复制直链 (F2)', icon: LinkIcon },
   { key: 'markdown', label: 'MD', title: '复制 Markdown', icon: Braces },
   { key: 'html', label: 'HTML', title: '复制 HTML', icon: Code2 },
@@ -1029,617 +1110,751 @@ onMounted(async () => {
   tickTimer = window.setInterval(() => {
     nowTick.value = Date.now()
   }, 30000)
+  // 首屏稳定后空闲预取另一视图（列表↔回收站），使首次点「回收站」也秒开
+  warmTimer = window.setTimeout(warmOtherView, 1200)
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown)
   if (tickTimer) clearInterval(tickTimer)
+  if (warmTimer) clearTimeout(warmTimer)
 })
 </script>
 
 <template>
-  <AppShell>
-    <div class="flex flex-col gap-4">
-      <!-- 页头 -->
-      <div class="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h2 class="text-xl font-bold text-gray-900 sm:text-2xl dark:text-white">{{ trashMode ? '回收站' : '图片列表' }}</h2>
-          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-            {{ trashMode ? trashFootprintText : '管理和浏览您上传的所有图片' }}
-          </p>
-        </div>
+  <div class="flex flex-col gap-4">
+    <!-- 页头 -->
+    <div class="flex flex-wrap items-end justify-between gap-3">
+      <div>
+        <h2 class="text-xl font-bold text-gray-900 sm:text-2xl dark:text-white">
+          {{ trashMode ? '回收站' : '图片列表' }}
+        </h2>
+        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+          {{ trashMode ? trashFootprintText : '管理和浏览您上传的所有图片' }}
+        </p>
       </div>
+    </div>
 
-      <!-- 工具栏卡片：搜索 + 批量操作 + 导出 + 刷新 + 视图切换 -->
-      <div class="card flex flex-col gap-3 p-3 sm:p-4">
-        <div class="flex flex-wrap items-center gap-2 sm:gap-3">
-          <!-- 搜索框：文件名 / URL（/ 快捷聚焦，Esc 清空） -->
-          <div class="relative min-w-0 flex-1 basis-48">
-            <Search class="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
-            <input
-              ref="searchInput"
-              v-model="keyword"
-              type="text"
-              placeholder="搜索文件名、URL..."
-              class="h-10 w-full rounded-xl border border-gray-200 bg-gray-50 pl-10 pr-9 text-sm outline-none transition-all placeholder:text-gray-400 focus:border-indigo-400 focus:bg-white focus:ring-4 focus:ring-indigo-500/10 dark:border-gray-700 dark:bg-gray-800/60 dark:text-gray-100 dark:focus:bg-gray-800"
-            />
-            <button
-              v-if="keyword"
-              @click="keyword = ''"
-              class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 transition-colors hover:text-gray-600 dark:hover:text-gray-200"
-              title="清空搜索"
-            >
-              <X class="h-4 w-4" />
-            </button>
-          </div>
-          <!-- 批量选择模式入口：选择模式下变为「完成」 -->
-          <button
-            v-if="!selectMode"
-            @click="selectMode = true"
-            :disabled="list.length === 0"
-            class="flex h-10 items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3 text-xs font-semibold text-gray-600 shadow-sm transition-colors hover:border-indigo-200 hover:text-indigo-600 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:border-indigo-500/40 dark:hover:text-indigo-300"
-            title="进入批量选择（移动端也可长按图片）"
-          >
-            <CheckSquare class="h-3.5 w-3.5" />
-            <span class="hidden sm:inline">批量选择</span>
-          </button>
-          <button
-            v-else
-            @click="exitSelectMode"
-            class="flex h-10 items-center gap-1.5 rounded-xl bg-indigo-600 px-3 text-xs font-semibold text-white shadow-sm shadow-indigo-500/30 transition-colors hover:bg-indigo-500"
-            title="退出批量选择（Esc）"
-          >
-            <Check class="h-3.5 w-3.5" />
-            完成
-          </button>
-          <!-- 批量操作下拉 -->
-          <div class="relative">
-            <button
-              @click="showBatchMenu = !showBatchMenu; showSortMenu = false; showTypeMenu = false; showSizeMenu = false"
-              :disabled="list.length === 0"
-              class="flex h-10 items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3 text-xs font-semibold text-gray-600 shadow-sm transition-colors hover:border-indigo-200 hover:text-indigo-600 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:border-indigo-500/40 dark:hover:text-indigo-300"
-            >
-              <SlidersHorizontal class="h-3.5 w-3.5" />
-              <span class="hidden sm:inline">批量操作</span>
-              <ChevronDown class="h-3.5 w-3.5 transition-transform" :class="showBatchMenu ? 'rotate-180' : ''" />
-            </button>
-            <Transition
-              enter-active-class="transition duration-150 ease-out"
-              enter-from-class="opacity-0 -translate-y-1"
-              enter-to-class="opacity-100 translate-y-0"
-              leave-active-class="transition duration-100 ease-in"
-              leave-from-class="opacity-100 translate-y-0"
-              leave-to-class="opacity-0 -translate-y-1"
-            >
-              <div
-                v-if="showBatchMenu"
-                class="absolute right-0 z-30 mt-2 w-48 overflow-hidden rounded-xl border border-gray-100 bg-white py-1.5 shadow-xl dark:border-gray-700 dark:bg-gray-800"
-              >
-                <button
-                  v-if="!trashMode"
-                  @click="copySelected('url'); closeMenus()"
-                  class="flex w-full items-center gap-2 px-4 py-2 text-left text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 hover:text-indigo-600 dark:text-gray-300 dark:hover:bg-gray-700/60"
-                >
-                  <Copy class="h-3.5 w-3.5" /> 复制选中链接
-                </button>
-                <button
-                  v-if="!trashMode"
-                  @click="copySelected('markdown'); closeMenus()"
-                  class="flex w-full items-center gap-2 px-4 py-2 text-left text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 hover:text-indigo-600 dark:text-gray-300 dark:hover:bg-gray-700/60"
-                >
-                  <Braces class="h-3.5 w-3.5" /> 复制 Markdown
-                </button>
-                <button
-                  v-if="!trashMode"
-                  @click="copySelected('html'); closeMenus()"
-                  class="flex w-full items-center gap-2 px-4 py-2 text-left text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 hover:text-indigo-600 dark:text-gray-300 dark:hover:bg-gray-700/60"
-                >
-                  <Code2 class="h-3.5 w-3.5" /> 复制 HTML
-                </button>
-                <button
-                  v-if="!trashMode"
-                  @click="copySelected('bbcode'); closeMenus()"
-                  class="flex w-full items-center gap-2 px-4 py-2 text-left text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 hover:text-indigo-600 dark:text-gray-300 dark:hover:bg-gray-700/60"
-                >
-                  <Code2 class="h-3.5 w-3.5" /> 复制 BBCode
-                </button>
-                <button
-                  @click="exportRecords(selectedList.length > 0 ? 'selected' : 'all'); closeMenus()"
-                  class="flex w-full items-center gap-2 px-4 py-2 text-left text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 hover:text-indigo-600 dark:text-gray-300 dark:hover:bg-gray-700/60"
-                >
-                  <Download class="h-3.5 w-3.5" /> {{ selectedList.length > 0 ? `导出选中(${selectedList.length})` : '导出 JSON' }}
-                </button>
-                <button
-                  @click="pickImportFile(); closeMenus()"
-                  class="flex w-full items-center gap-2 px-4 py-2 text-left text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 hover:text-indigo-600 dark:text-gray-300 dark:hover:bg-gray-700/60"
-                >
-                  <Upload class="h-3.5 w-3.5" /> 导入 JSON
-                </button>
-                <button
-                  v-if="trashMode"
-                  @click="restoreBatch(); closeMenus()"
-                  class="flex w-full items-center gap-2 px-4 py-2 text-left text-xs font-medium text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-500/10"
-                >
-                  <ArchiveRestore class="h-3.5 w-3.5" /> 恢复选中 ({{ selectedList.length }})
-                </button>
-                <button
-                  @click="askBatchDelete(); closeMenus()"
-                  class="flex w-full items-center gap-2 px-4 py-2 text-left text-xs font-medium text-red-500 transition-colors hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-500/10"
-                >
-                  <Trash2 class="h-3.5 w-3.5" /> {{ trashMode ? `彻底删除(${selectedList.length})` : `删除选中(${selectedList.length})` }}
-                </button>
-              </div>
-            </Transition>
-          </div>
-          <button
-            @click="exportRecords(selectedList.length > 0 ? 'selected' : 'all')"
-            :disabled="list.length === 0"
-            class="hidden h-10 items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3 text-xs font-semibold text-gray-600 shadow-sm transition-colors hover:border-indigo-200 hover:text-indigo-600 disabled:cursor-not-allowed disabled:opacity-50 sm:flex dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:border-indigo-500/40 dark:hover:text-indigo-300"
-            :title="selectedList.length > 0 ? '导出选中记录' : '导出当前筛选的全部记录'"
-          >
-            <Download class="h-3.5 w-3.5" />
-            导出 JSON
-          </button>
-          <button
-            @click="showShortcuts = !showShortcuts"
-            class="hidden h-10 items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3 text-xs font-semibold text-gray-500 shadow-sm transition-colors hover:border-indigo-200 hover:text-indigo-600 md:flex dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:hover:border-indigo-500/40 dark:hover:text-indigo-300"
-            title="键盘快捷键"
-          >
-            <Keyboard class="h-3.5 w-3.5" />
-            快捷键
-          </button>
-          <button
-            @click="fetchList()"
-            class="flex h-10 items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3 text-xs font-semibold text-gray-600 shadow-sm transition-colors hover:border-indigo-200 hover:text-indigo-600 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:border-indigo-500/40 dark:hover:text-indigo-300"
-            title="刷新"
-          >
-            <RefreshCw class="h-3.5 w-3.5" :class="loading ? 'animate-spin' : ''" />
-            <span class="hidden sm:inline">刷新</span>
-          </button>
-          <!-- 网格 / 列表切换 + 网格密度 -->
-          <div class="flex h-10 items-center gap-0.5 rounded-xl border border-gray-200 bg-white p-1 shadow-sm dark:border-gray-700 dark:bg-gray-800">
-            <button
-              @click="viewMode = 'grid'"
-              class="flex h-8 w-8 items-center justify-center rounded-lg transition-colors"
-              :class="viewMode === 'grid' ? 'bg-indigo-50 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-300' : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-200'"
-              title="网格视图"
-            >
-              <LayoutGrid class="h-4 w-4" />
-            </button>
-            <button
-              @click="viewMode = 'list'"
-              class="flex h-8 w-8 items-center justify-center rounded-lg transition-colors"
-              :class="viewMode === 'list' ? 'bg-indigo-50 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-300' : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-200'"
-              title="列表视图"
-            >
-              <List class="h-4 w-4" />
-            </button>
-            <button
-              v-if="viewMode === 'grid'"
-              @click="gridDensity = gridDensity === 'compact' ? 'comfortable' : 'compact'"
-              class="flex h-8 w-8 items-center justify-center rounded-lg text-gray-400 transition-colors hover:text-gray-600 dark:hover:text-gray-200"
-              :title="gridDensity === 'compact' ? '切换为舒适密度' : '切换为紧凑密度'"
-            >
-              <Grid3x3 v-if="gridDensity === 'compact'" class="h-4 w-4" />
-              <Grid2x2 v-else class="h-4 w-4" />
-            </button>
-          </div>
-        </div>
-
-        <!-- 筛选行：排序 / 类型 / 大小 / 时间（移动端收进筛选抽屉）+ 共 N 张 -->
-        <div class="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-gray-100 pt-3 text-xs dark:border-gray-800">
-          <!-- 排序下拉 -->
-          <div class="relative hidden items-center gap-1.5 sm:flex">
-            <span class="text-gray-400 dark:text-gray-500">排序：</span>
-            <button
-              @click="showSortMenu = !showSortMenu; showBatchMenu = false; showTypeMenu = false; showSizeMenu = false; showTimeMenu = false"
-              class="flex items-center gap-1 rounded-lg bg-indigo-50 px-2.5 py-1.5 font-semibold text-indigo-600 transition-colors hover:bg-indigo-100 dark:bg-indigo-500/15 dark:text-indigo-300 dark:hover:bg-indigo-500/25"
-            >
-              {{ sortLabel }}
-              <ChevronDown class="h-3 w-3 transition-transform" :class="showSortMenu ? 'rotate-180' : ''" />
-            </button>
-            <div
-              v-if="showSortMenu"
-              class="absolute left-10 top-full z-30 mt-2 w-36 overflow-hidden rounded-xl border border-gray-100 bg-white py-1.5 shadow-xl dark:border-gray-700 dark:bg-gray-800"
-            >
-              <button
-                v-for="opt in sortOptions"
-                :key="opt.key"
-                @click="setSort(opt.key)"
-                class="flex w-full items-center justify-between px-4 py-2 text-left text-xs font-medium transition-colors"
-                :class="sortKey === opt.key ? 'text-indigo-600 dark:text-indigo-300' : 'text-gray-600 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-700/60'"
-              >
-                {{ opt.label }}
-                <ChevronUp v-if="sortKey === opt.key && sortDir === 'asc'" class="h-3 w-3" />
-                <ChevronDown v-else-if="sortKey === opt.key" class="h-3 w-3" />
-              </button>
-            </div>
-          </div>
-          <!-- 类型下拉 -->
-          <div class="relative hidden items-center gap-1.5 sm:flex">
-            <span class="text-gray-400 dark:text-gray-500">类型：</span>
-            <button
-              @click="showTypeMenu = !showTypeMenu; showBatchMenu = false; showSortMenu = false; showSizeMenu = false; showTimeMenu = false"
-              class="flex items-center gap-1 rounded-lg bg-gray-100 px-2.5 py-1.5 font-semibold text-gray-600 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
-            >
-              {{ typeLabel }}
-              <ChevronDown class="h-3 w-3 transition-transform" :class="showTypeMenu ? 'rotate-180' : ''" />
-            </button>
-            <div
-              v-if="showTypeMenu"
-              class="absolute left-10 top-full z-30 mt-2 w-32 overflow-hidden rounded-xl border border-gray-100 bg-white py-1.5 shadow-xl dark:border-gray-700 dark:bg-gray-800"
-            >
-              <button
-                @click="typeFilter = 'all'; showTypeMenu = false"
-                class="block w-full px-4 py-2 text-left text-xs font-bold transition-colors"
-                :class="typeFilter === 'all' ? 'text-indigo-600 dark:text-indigo-300' : 'text-gray-600 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-700/60'"
-              >
-                全部
-              </button>
-              <button
-                v-for="t in availableTypes"
-                :key="t"
-                @click="typeFilter = t; showTypeMenu = false"
-                class="block w-full px-4 py-2 text-left text-xs font-bold uppercase transition-colors"
-                :class="typeFilter === t ? 'text-indigo-600 dark:text-indigo-300' : 'text-gray-600 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-700/60'"
-              >
-                {{ t }}
-              </button>
-            </div>
-          </div>
-          <!-- 大小下拉 -->
-          <div class="relative hidden items-center gap-1.5 sm:flex">
-            <span class="text-gray-400 dark:text-gray-500">大小：</span>
-            <button
-              @click="showSizeMenu = !showSizeMenu; showBatchMenu = false; showSortMenu = false; showTypeMenu = false; showTimeMenu = false"
-              class="flex items-center gap-1 rounded-lg bg-gray-100 px-2.5 py-1.5 font-semibold text-gray-600 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
-            >
-              {{ sizeLabel }}
-              <ChevronDown class="h-3 w-3 transition-transform" :class="showSizeMenu ? 'rotate-180' : ''" />
-            </button>
-            <div
-              v-if="showSizeMenu"
-              class="absolute left-10 top-full z-30 mt-2 w-36 overflow-hidden rounded-xl border border-gray-100 bg-white py-1.5 shadow-xl dark:border-gray-700 dark:bg-gray-800"
-            >
-              <button
-                v-for="opt in sizeFilterOptions"
-                :key="opt.value"
-                @click="sizeFilter = opt.value; showSizeMenu = false"
-                class="block w-full px-4 py-2 text-left text-xs font-bold transition-colors"
-                :class="sizeFilter === opt.value ? 'text-indigo-600 dark:text-indigo-300' : 'text-gray-600 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-700/60'"
-              >
-                {{ opt.label }}
-              </button>
-            </div>
-          </div>
-          <!-- 时间下拉 -->
-          <div class="relative hidden items-center gap-1.5 sm:flex">
-            <span class="text-gray-400 dark:text-gray-500">时间：</span>
-            <button
-              @click="showTimeMenu = !showTimeMenu; showBatchMenu = false; showSortMenu = false; showTypeMenu = false; showSizeMenu = false"
-              class="flex items-center gap-1 rounded-lg bg-gray-100 px-2.5 py-1.5 font-semibold text-gray-600 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
-            >
-              {{ timeLabel }}
-              <ChevronDown class="h-3 w-3 transition-transform" :class="showTimeMenu ? 'rotate-180' : ''" />
-            </button>
-            <div
-              v-if="showTimeMenu"
-              class="absolute left-10 top-full z-30 mt-2 w-32 overflow-hidden rounded-xl border border-gray-100 bg-white py-1.5 shadow-xl dark:border-gray-700 dark:bg-gray-800"
-            >
-              <button
-                v-for="opt in timeFilterOptions"
-                :key="opt.value"
-                @click="timeFilter = opt.value; showTimeMenu = false"
-                class="block w-full px-4 py-2 text-left text-xs font-bold transition-colors"
-                :class="timeFilter === opt.value ? 'text-indigo-600 dark:text-indigo-300' : 'text-gray-600 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-700/60'"
-              >
-                {{ opt.label }}
-              </button>
-            </div>
-          </div>
-          <!-- 移动端：筛选收纳入口 -->
-          <button
-            @click="openFilterSheet"
-            class="flex items-center gap-1 rounded-lg bg-gray-100 px-2.5 py-1.5 font-semibold text-gray-600 transition-colors hover:bg-gray-200 sm:hidden dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
-          >
-            <SlidersHorizontal class="h-3 w-3" />
-            筛选<template v-if="activeFilterCount"> ({{ activeFilterCount }})</template>
-          </button>
-          <p class="ml-auto text-xs tabular-nums text-gray-400 dark:text-gray-500">
-            共 {{ filteredList.length }} 张图片
-          </p>
-        </div>
-
-        <!-- 筛选 Chip 行：生效条件一览，可单独移除 -->
-        <div v-if="hasActiveFilters" class="flex flex-wrap items-center gap-1.5 border-t border-gray-100 pt-3 dark:border-gray-800">
+    <!-- 工具栏卡片：搜索 + 批量操作 + 导出 + 刷新 + 视图切换 -->
+    <div class="card flex flex-col gap-3 p-3 sm:p-4">
+      <div class="flex flex-wrap items-center gap-2 sm:gap-3">
+        <!-- 搜索框：文件名 / URL（/ 快捷聚焦，Esc 清空） -->
+        <div class="relative min-w-0 flex-1 basis-48">
+          <Search class="absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-gray-400" />
+          <input
+            ref="searchInput"
+            v-model="keyword"
+            type="text"
+            placeholder="搜索文件名、URL..."
+            class="h-10 w-full rounded-xl border border-gray-200 bg-gray-50 pl-10 pr-9 text-sm outline-none transition-all placeholder:text-gray-400 focus:border-indigo-400 focus:bg-white focus:ring-4 focus:ring-indigo-500/10 dark:border-gray-700 dark:bg-gray-800/60 dark:text-gray-100 dark:focus:bg-gray-800"
+          />
           <button
             v-if="keyword"
             @click="keyword = ''"
-            class="flex items-center gap-1 rounded-full bg-indigo-50 px-2.5 py-1 text-[11px] font-semibold text-indigo-600 transition-colors hover:bg-indigo-100 dark:bg-indigo-500/15 dark:text-indigo-300"
-            title="移除搜索条件"
+            class="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 transition-colors hover:text-gray-600 dark:hover:text-gray-200"
+            title="清空搜索"
           >
-            搜索: {{ keyword }}
-            <X class="h-3 w-3" />
-          </button>
-          <button
-            v-if="typeFilter !== 'all'"
-            @click="typeFilter = 'all'"
-            class="flex items-center gap-1 rounded-full bg-indigo-50 px-2.5 py-1 text-[11px] font-semibold text-indigo-600 transition-colors hover:bg-indigo-100 dark:bg-indigo-500/15 dark:text-indigo-300"
-            title="移除类型条件"
-          >
-            类型: {{ typeFilter.toUpperCase() }}
-            <X class="h-3 w-3" />
-          </button>
-          <button
-            v-if="sizeFilter !== 'all'"
-            @click="sizeFilter = 'all'"
-            class="flex items-center gap-1 rounded-full bg-indigo-50 px-2.5 py-1 text-[11px] font-semibold text-indigo-600 transition-colors hover:bg-indigo-100 dark:bg-indigo-500/15 dark:text-indigo-300"
-            title="移除大小条件"
-          >
-            大小: {{ sizeLabel }}
-            <X class="h-3 w-3" />
-          </button>
-          <button
-            v-if="timeFilter !== 'all'"
-            @click="timeFilter = 'all'"
-            class="flex items-center gap-1 rounded-full bg-indigo-50 px-2.5 py-1 text-[11px] font-semibold text-indigo-600 transition-colors hover:bg-indigo-100 dark:bg-indigo-500/15 dark:text-indigo-300"
-            title="移除时间条件"
-          >
-            时间: {{ timeLabel }}
-            <X class="h-3 w-3" />
-          </button>
-          <button
-            @click="clearFilters"
-            class="rounded-full px-2 py-1 text-[11px] font-semibold text-gray-400 transition-colors hover:text-gray-600 dark:hover:text-gray-200"
-          >
-            清空筛选
+            <X class="h-4 w-4" />
           </button>
         </div>
-      </div>
-
-      <!-- 导入 JSON 备份的隐藏文件选择框（批量操作菜单触发） -->
-      <input
-        ref="importInput"
-        type="file"
-        accept="application/json,.json"
-        class="hidden"
-        @change="handleImportFile"
-      />
-
-      <!-- 快捷键帮助 -->
-      <div v-if="showShortcuts" class="card flex flex-wrap items-center gap-x-5 gap-y-2 px-5 py-3 text-xs text-gray-500 dark:text-gray-400">
-        <span><kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800">↑</kbd>/<kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800">↓</kbd> 选择</span>
-        <span><kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800">X</kbd> 选中</span>
-        <span><kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800">Enter</kbd> 预览</span>
-        <span><kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800">←</kbd>/<kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800">→</kbd> 预览切换</span>
-        <span><kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800">F2</kbd> 复制链接</span>
-        <span><kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800">Del</kbd> 删除</span>
-        <span><kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800">/</kbd> 搜索</span>
-        <span><kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800">Ctrl+A</kbd> 全选</span>
-        <span><kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800">Esc</kbd> 关闭弹层</span>
-        <span><kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800">?</kbd> 显示/隐藏本卡</span>
-      </div>
-
-      <!-- 批量操作工具栏：有选中项时出现 -->
-      <Transition
-        enter-active-class="transition duration-200 ease-out"
-        enter-from-class="opacity-0 -translate-y-2"
-        enter-to-class="opacity-100 translate-y-0"
-        leave-active-class="transition duration-150 ease-in"
-        leave-from-class="opacity-100 translate-y-0"
-        leave-to-class="opacity-0 -translate-y-2"
-      >
-        <div
-          v-if="selectMode || selectedList.length > 0"
-          class="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-indigo-200/60 bg-indigo-50/80 px-5 py-3 backdrop-blur-md max-md:fixed max-md:inset-x-3 max-md:bottom-[4.75rem] max-md:z-40 max-md:bg-indigo-50/95 max-md:shadow-2xl dark:border-indigo-500/20 dark:bg-indigo-900/30 dark:max-md:bg-gray-900/95"
+        <!-- 批量选择模式入口：选择模式下变为「完成」 -->
+        <button
+          v-if="!selectMode"
+          @click="selectMode = true"
+          :disabled="list.length === 0"
+          class="flex h-10 items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3 text-xs font-semibold text-gray-600 shadow-sm transition-colors hover:border-indigo-200 hover:text-indigo-600 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:border-indigo-500/40 dark:hover:text-indigo-300"
+          title="进入批量选择（移动端也可长按图片）"
         >
-          <p class="relative text-sm font-semibold text-indigo-700 dark:text-indigo-300">
-            已选 <span class="font-bold">{{ selectedList.length }}</span>{{ selectMode ? ` / ${filteredList.length} 张` : ' 项' }}
-            <span v-if="selectMode" class="relative ml-2 inline-block">
-              <button
-                @click="showSelectMenu = !showSelectMenu"
-                class="rounded-md bg-white px-2 py-1 text-xs font-semibold text-indigo-600 ring-1 ring-indigo-200 transition-colors hover:bg-indigo-100 dark:bg-gray-800 dark:text-indigo-300 dark:ring-indigo-500/30 dark:hover:bg-indigo-900/40"
-              >
-                全选
-                <ChevronDown class="inline h-3 w-3 align-[-1px] transition-transform" :class="showSelectMenu ? 'rotate-180' : ''" />
-              </button>
-              <div
-                v-if="showSelectMenu"
-                class="absolute left-0 top-full z-30 mt-1 w-44 overflow-hidden rounded-xl border border-gray-100 bg-white py-1.5 shadow-xl dark:border-gray-700 dark:bg-gray-800"
-              >
-                <button
-                  @click="selectPage(); showSelectMenu = false"
-                  class="block w-full px-4 py-2 text-left text-xs font-semibold text-gray-600 transition-colors hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-700/60"
-                >
-                  全选本页（{{ pagedList.length }}）
-                </button>
-                <button
-                  @click="selectAllFiltered(); showSelectMenu = false"
-                  class="block w-full px-4 py-2 text-left text-xs font-semibold text-gray-600 transition-colors hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-700/60"
-                >
-                  全选全部（{{ filteredList.length }}）
-                </button>
-                <button
-                  v-if="selectedList.length > 0"
-                  @click="clearSelection(); showSelectMenu = false"
-                  class="block w-full px-4 py-2 text-left text-xs font-semibold text-gray-600 transition-colors hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-700/60"
-                >
-                  取消全选
-                </button>
-              </div>
-            </span>
-            <button
-              v-else
-              @click="clearSelection"
-              class="ml-2 text-xs font-medium text-gray-500 underline-offset-2 hover:underline dark:text-gray-400"
-            >
-              取消选择
-            </button>
-          </p>
-          <div v-if="selectedList.length > 0" class="flex flex-wrap items-center gap-2">
-            <template v-if="!trashMode">
-              <button
-                @click="copySelected('url')"
-                class="flex h-8 items-center gap-1.5 rounded-lg bg-white px-3 text-xs font-semibold text-gray-600 shadow-sm ring-1 ring-gray-200 transition-colors hover:bg-indigo-50 hover:text-indigo-600 dark:bg-gray-800 dark:text-gray-300 dark:ring-gray-700 dark:hover:bg-indigo-900/30 dark:hover:text-indigo-300"
-              >
-                <Copy class="h-3.5 w-3.5" />
-                复制选中链接
-              </button>
-              <button
-                @click="copySelected('markdown')"
-                class="flex h-8 items-center gap-1.5 rounded-lg bg-white px-3 text-xs font-semibold text-gray-600 shadow-sm ring-1 ring-gray-200 transition-colors hover:bg-indigo-50 hover:text-indigo-600 dark:bg-gray-800 dark:text-gray-300 dark:ring-gray-700 dark:hover:bg-indigo-900/30 dark:hover:text-indigo-300"
-              >
-                <Braces class="h-3.5 w-3.5" />
-                复制 Markdown
-              </button>
-              <button
-                @click="copySelected('html')"
-                class="flex h-8 items-center gap-1.5 rounded-lg bg-white px-3 text-xs font-semibold text-gray-600 shadow-sm ring-1 ring-gray-200 transition-colors hover:bg-indigo-50 hover:text-indigo-600 dark:bg-gray-800 dark:text-gray-300 dark:ring-gray-700 dark:hover:bg-indigo-900/30 dark:hover:text-indigo-300"
-              >
-                <Code2 class="h-3.5 w-3.5" />
-                复制 HTML
-              </button>
-              <button
-                @click="copySelected('bbcode')"
-                class="flex h-8 items-center gap-1.5 rounded-lg bg-white px-3 text-xs font-semibold text-gray-600 shadow-sm ring-1 ring-gray-200 transition-colors hover:bg-indigo-50 hover:text-indigo-600 dark:bg-gray-800 dark:text-gray-300 dark:ring-gray-700 dark:hover:bg-indigo-900/30 dark:hover:text-indigo-300"
-              >
-                <Code2 class="h-3.5 w-3.5" />
-                BBCode
-              </button>
-            </template>
-            <button
-              v-if="trashMode"
-              @click="restoreBatch"
-              class="flex h-8 items-center gap-1.5 rounded-lg bg-emerald-500 px-3 text-xs font-bold text-white shadow-sm transition-colors hover:bg-emerald-600"
-            >
-              <ArchiveRestore class="h-3.5 w-3.5" />
-              恢复选中 ({{ selectedList.length }})
-            </button>
-            <button
-              @click="askBatchDelete"
-              :disabled="batchDeleting"
-              class="flex h-8 items-center gap-1.5 rounded-lg bg-red-500 px-3 text-xs font-bold text-white shadow-sm transition-colors hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              <Trash2 class="h-3.5 w-3.5" />
-              {{ trashMode ? '彻底删除' : '删除选中' }} ({{ selectedList.length }})
-            </button>
-          </div>
-        </div>
-      </Transition>
-
-
-
-      <!-- ========== 网格视图（默认，与目标图一致） ========== -->
-      <template v-if="viewMode === 'grid'">
-        <div v-if="loading" :class="gridClass">
-          <div v-for="i in 8" :key="i" class="card overflow-hidden">
-            <div class="aspect-[4/3] shimmer-placeholder" />
-            <div class="space-y-2 p-3">
-              <div class="h-3.5 w-2/3 rounded-full shimmer-placeholder" />
-              <div class="h-3 w-1/2 rounded-full shimmer-placeholder" />
-            </div>
-          </div>
-        </div>
-
-        <div v-else-if="filteredList.length === 0" class="card flex flex-col items-center justify-center gap-2 p-16 text-center sm:p-20">
-          <FileImage class="h-14 w-14 text-gray-300 opacity-60 dark:text-gray-600" />
-          <p class="text-base font-semibold text-gray-500 dark:text-gray-400">{{ hasActiveFilters ? '没有匹配的图片' : trashMode ? '回收站是空的' : '暂无上传记录' }}</p>
-          <p v-if="hasActiveFilters" class="text-xs text-gray-400 dark:text-gray-500">换个条件试试</p>
+          <CheckSquare class="h-3.5 w-3.5" />
+          <span class="hidden sm:inline">批量选择</span>
+        </button>
+        <button
+          v-else
+          @click="exitSelectMode"
+          class="flex h-10 items-center gap-1.5 rounded-xl bg-indigo-600 px-3 text-xs font-semibold text-white shadow-sm shadow-indigo-500/30 transition-colors hover:bg-indigo-500"
+          title="退出批量选择（Esc）"
+        >
+          <Check class="h-3.5 w-3.5" />
+          完成
+        </button>
+        <!-- 批量操作下拉 -->
+        <div class="relative">
           <button
-            v-if="hasActiveFilters"
-            @click="clearFilters"
-            class="mt-3 rounded-xl bg-indigo-50 px-4 py-2 text-xs font-bold text-indigo-600 transition-colors hover:bg-indigo-100 dark:bg-indigo-500/15 dark:text-indigo-300 dark:hover:bg-indigo-500/25"
+            @click="showBatchMenu = !showBatchMenu; showSortMenu = false; showTypeMenu = false; showSizeMenu = false"
+            :disabled="list.length === 0"
+            class="flex h-10 items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3 text-xs font-semibold text-gray-600 shadow-sm transition-colors hover:border-indigo-200 hover:text-indigo-600 disabled:cursor-not-allowed disabled:opacity-50 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:border-indigo-500/40 dark:hover:text-indigo-300"
           >
-            清除筛选
+            <SlidersHorizontal class="h-3.5 w-3.5" />
+            <span class="hidden sm:inline">批量操作</span>
+            <ChevronDown
+              class="h-3.5 w-3.5 transition-transform"
+              :class="showBatchMenu ? 'rotate-180' : ''"
+            />
           </button>
-          <RouterLink
-            v-if="!hasActiveFilters && !trashMode"
-            to="/"
-            class="brand-gradient mt-4 rounded-xl px-5 py-2.5 text-sm font-bold text-white shadow-lg shadow-indigo-500/30 transition-all hover:-translate-y-0.5 hover:brightness-110"
+          <Transition
+            enter-active-class="transition duration-150 ease-out"
+            enter-from-class="opacity-0 -translate-y-1"
+            enter-to-class="opacity-100 translate-y-0"
+            leave-active-class="transition duration-100 ease-in"
+            leave-from-class="opacity-100 translate-y-0"
+            leave-to-class="opacity-0 -translate-y-1"
           >
-            去上传第一张图
-          </RouterLink>
+            <div
+              v-if="showBatchMenu"
+              class="absolute right-0 z-30 mt-2 w-48 overflow-hidden rounded-xl border border-gray-100 bg-white py-1.5 shadow-xl dark:border-gray-700 dark:bg-gray-800"
+            >
+              <button
+                v-if="!trashMode"
+                @click="copySelected('url'); closeMenus()"
+                class="flex w-full items-center gap-2 px-4 py-2 text-left text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 hover:text-indigo-600 dark:text-gray-300 dark:hover:bg-gray-700/60"
+              >
+                <Copy class="h-3.5 w-3.5" /> 复制选中链接
+              </button>
+              <button
+                v-if="!trashMode"
+                @click="copySelected('markdown'); closeMenus()"
+                class="flex w-full items-center gap-2 px-4 py-2 text-left text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 hover:text-indigo-600 dark:text-gray-300 dark:hover:bg-gray-700/60"
+              >
+                <Braces class="h-3.5 w-3.5" /> 复制 Markdown
+              </button>
+              <button
+                v-if="!trashMode"
+                @click="copySelected('html'); closeMenus()"
+                class="flex w-full items-center gap-2 px-4 py-2 text-left text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 hover:text-indigo-600 dark:text-gray-300 dark:hover:bg-gray-700/60"
+              >
+                <Code2 class="h-3.5 w-3.5" /> 复制 HTML
+              </button>
+              <button
+                v-if="!trashMode"
+                @click="copySelected('bbcode'); closeMenus()"
+                class="flex w-full items-center gap-2 px-4 py-2 text-left text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 hover:text-indigo-600 dark:text-gray-300 dark:hover:bg-gray-700/60"
+              >
+                <Code2 class="h-3.5 w-3.5" /> 复制 BBCode
+              </button>
+              <button
+                @click="exportRecords(selectedList.length > 0 ? 'selected' : 'all'); closeMenus()"
+                class="flex w-full items-center gap-2 px-4 py-2 text-left text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 hover:text-indigo-600 dark:text-gray-300 dark:hover:bg-gray-700/60"
+              >
+                <Download class="h-3.5 w-3.5" />
+                {{ selectedList.length > 0 ? `导出选中(${selectedList.length})` : '导出 JSON' }}
+              </button>
+              <button
+                @click="pickImportFile(); closeMenus()"
+                class="flex w-full items-center gap-2 px-4 py-2 text-left text-xs font-medium text-gray-600 transition-colors hover:bg-gray-50 hover:text-indigo-600 dark:text-gray-300 dark:hover:bg-gray-700/60"
+              >
+                <Upload class="h-3.5 w-3.5" /> 导入 JSON
+              </button>
+              <button
+                v-if="trashMode"
+                @click="restoreBatch(); closeMenus()"
+                class="flex w-full items-center gap-2 px-4 py-2 text-left text-xs font-medium text-emerald-600 transition-colors hover:bg-emerald-50 dark:text-emerald-400 dark:hover:bg-emerald-500/10"
+              >
+                <ArchiveRestore class="h-3.5 w-3.5" /> 恢复选中 ({{ selectedList.length }})
+              </button>
+              <button
+                @click="askBatchDelete(); closeMenus()"
+                class="flex w-full items-center gap-2 px-4 py-2 text-left text-xs font-medium text-red-500 transition-colors hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-500/10"
+              >
+                <Trash2 class="h-3.5 w-3.5" />
+                {{
+                  trashMode
+                    ? `彻底删除(${selectedList.length})`
+                    : `删除选中(${selectedList.length})`
+                }}
+              </button>
+            </div>
+          </Transition>
         </div>
-
-        <TransitionGroup v-else name="card-list" tag="div" :class="gridClass">
-          <div
-            v-for="(item, idx) in pagedList"
-            :key="item.id"
-            class="card group overflow-hidden transition-all"
-            :class="[
-              isSelected(item.id) ? 'ring-2 ring-indigo-500 dark:ring-indigo-400' : 'hover:shadow-lg',
-              focusIndex === ((page - 1) * pageSize + idx) ? 'ring-2 ring-indigo-400/60' : '',
-            ]"
+        <button
+          @click="exportRecords(selectedList.length > 0 ? 'selected' : 'all')"
+          :disabled="list.length === 0"
+          class="hidden h-10 items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3 text-xs font-semibold text-gray-600 shadow-sm transition-colors hover:border-indigo-200 hover:text-indigo-600 disabled:cursor-not-allowed disabled:opacity-50 sm:flex dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:border-indigo-500/40 dark:hover:text-indigo-300"
+          :title="selectedList.length > 0 ? '导出选中记录' : '导出当前筛选的全部记录'"
+        >
+          <Download class="h-3.5 w-3.5" />
+          导出 JSON
+        </button>
+        <button
+          @click="showShortcuts = !showShortcuts"
+          class="hidden h-10 items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3 text-xs font-semibold text-gray-500 shadow-sm transition-colors hover:border-indigo-200 hover:text-indigo-600 md:flex dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:hover:border-indigo-500/40 dark:hover:text-indigo-300"
+          title="键盘快捷键"
+        >
+          <Keyboard class="h-3.5 w-3.5" />
+          快捷键
+        </button>
+        <button
+          @click="fetchList()"
+          class="flex h-10 items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3 text-xs font-semibold text-gray-600 shadow-sm transition-colors hover:border-indigo-200 hover:text-indigo-600 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:border-indigo-500/40 dark:hover:text-indigo-300"
+          title="刷新"
+        >
+          <RefreshCw class="h-3.5 w-3.5" :class="loading ? 'animate-spin' : ''" />
+          <span class="hidden sm:inline">刷新</span>
+        </button>
+        <!-- 网格 / 列表切换 + 网格密度 -->
+        <div
+          class="flex h-10 items-center gap-0.5 rounded-xl border border-gray-200 bg-white p-1 shadow-sm dark:border-gray-700 dark:bg-gray-800"
+        >
+          <button
+            @click="viewMode = 'grid'"
+            class="flex h-8 w-8 items-center justify-center rounded-lg transition-colors"
+            :class="
+              viewMode === 'grid'
+                ? 'bg-indigo-50 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-300'
+                : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-200'
+            "
+            title="网格视图"
           >
-            <!-- 缩略图区：hover 露出 checkbox + … 菜单；左下格式 badge；右下快捷复制 -->
-              <div class="relative aspect-[4/3] overflow-hidden bg-gray-100 dark:bg-gray-800">
+            <LayoutGrid class="h-4 w-4" />
+          </button>
+          <button
+            @click="viewMode = 'list'"
+            class="flex h-8 w-8 items-center justify-center rounded-lg transition-colors"
+            :class="
+              viewMode === 'list'
+                ? 'bg-indigo-50 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-300'
+                : 'text-gray-400 hover:text-gray-600 dark:hover:text-gray-200'
+            "
+            title="列表视图"
+          >
+            <List class="h-4 w-4" />
+          </button>
+          <button
+            v-if="viewMode === 'grid'"
+            @click="gridDensity = gridDensity === 'compact' ? 'comfortable' : 'compact'"
+            class="flex h-8 w-8 items-center justify-center rounded-lg text-gray-400 transition-colors hover:text-gray-600 dark:hover:text-gray-200"
+            :title="gridDensity === 'compact' ? '切换为舒适密度' : '切换为紧凑密度'"
+          >
+            <Grid3x3 v-if="gridDensity === 'compact'" class="h-4 w-4" />
+            <Grid2x2 v-else class="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+
+      <!-- 筛选行：排序 / 类型 / 大小 / 时间（移动端收进筛选抽屉）+ 共 N 张 -->
+      <div
+        class="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-gray-100 pt-3 text-xs dark:border-gray-800"
+      >
+        <!-- 排序下拉 -->
+        <div class="relative hidden items-center gap-1.5 sm:flex">
+          <span class="text-gray-400 dark:text-gray-500">排序：</span>
+          <button
+            @click="showSortMenu = !showSortMenu; showBatchMenu = false; showTypeMenu = false; showSizeMenu = false; showTimeMenu = false"
+            class="flex items-center gap-1 rounded-lg bg-indigo-50 px-2.5 py-1.5 font-semibold text-indigo-600 transition-colors hover:bg-indigo-100 dark:bg-indigo-500/15 dark:text-indigo-300 dark:hover:bg-indigo-500/25"
+          >
+            {{ sortLabel }}
+            <ChevronDown
+              class="h-3 w-3 transition-transform"
+              :class="showSortMenu ? 'rotate-180' : ''"
+            />
+          </button>
+          <div
+            v-if="showSortMenu"
+            class="absolute left-10 top-full z-30 mt-2 w-36 overflow-hidden rounded-xl border border-gray-100 bg-white py-1.5 shadow-xl dark:border-gray-700 dark:bg-gray-800"
+          >
+            <button
+              v-for="opt in sortOptions"
+              :key="opt.key"
+              @click="setSort(opt.key)"
+              class="flex w-full items-center justify-between px-4 py-2 text-left text-xs font-medium transition-colors"
+              :class="
+                sortKey === opt.key
+                  ? 'text-indigo-600 dark:text-indigo-300'
+                  : 'text-gray-600 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-700/60'
+              "
+            >
+              {{ opt.label }}
+              <ChevronUp v-if="sortKey === opt.key && sortDir === 'asc'" class="h-3 w-3" />
+              <ChevronDown v-else-if="sortKey === opt.key" class="h-3 w-3" />
+            </button>
+          </div>
+        </div>
+        <!-- 类型下拉 -->
+        <div class="relative hidden items-center gap-1.5 sm:flex">
+          <span class="text-gray-400 dark:text-gray-500">类型：</span>
+          <button
+            @click="showTypeMenu = !showTypeMenu; showBatchMenu = false; showSortMenu = false; showSizeMenu = false; showTimeMenu = false"
+            class="flex items-center gap-1 rounded-lg bg-gray-100 px-2.5 py-1.5 font-semibold text-gray-600 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
+          >
+            {{ typeLabel }}
+            <ChevronDown
+              class="h-3 w-3 transition-transform"
+              :class="showTypeMenu ? 'rotate-180' : ''"
+            />
+          </button>
+          <div
+            v-if="showTypeMenu"
+            class="absolute left-10 top-full z-30 mt-2 w-32 overflow-hidden rounded-xl border border-gray-100 bg-white py-1.5 shadow-xl dark:border-gray-700 dark:bg-gray-800"
+          >
+            <button
+              @click="typeFilter = 'all'; showTypeMenu = false"
+              class="block w-full px-4 py-2 text-left text-xs font-bold transition-colors"
+              :class="
+                typeFilter === 'all'
+                  ? 'text-indigo-600 dark:text-indigo-300'
+                  : 'text-gray-600 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-700/60'
+              "
+            >
+              全部
+            </button>
+            <button
+              v-for="t in availableTypes"
+              :key="t"
+              @click="typeFilter = t; showTypeMenu = false"
+              class="block w-full px-4 py-2 text-left text-xs font-bold uppercase transition-colors"
+              :class="
+                typeFilter === t
+                  ? 'text-indigo-600 dark:text-indigo-300'
+                  : 'text-gray-600 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-700/60'
+              "
+            >
+              {{ t }}
+            </button>
+          </div>
+        </div>
+        <!-- 大小下拉 -->
+        <div class="relative hidden items-center gap-1.5 sm:flex">
+          <span class="text-gray-400 dark:text-gray-500">大小：</span>
+          <button
+            @click="showSizeMenu = !showSizeMenu; showBatchMenu = false; showSortMenu = false; showTypeMenu = false; showTimeMenu = false"
+            class="flex items-center gap-1 rounded-lg bg-gray-100 px-2.5 py-1.5 font-semibold text-gray-600 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
+          >
+            {{ sizeLabel }}
+            <ChevronDown
+              class="h-3 w-3 transition-transform"
+              :class="showSizeMenu ? 'rotate-180' : ''"
+            />
+          </button>
+          <div
+            v-if="showSizeMenu"
+            class="absolute left-10 top-full z-30 mt-2 w-36 overflow-hidden rounded-xl border border-gray-100 bg-white py-1.5 shadow-xl dark:border-gray-700 dark:bg-gray-800"
+          >
+            <button
+              v-for="opt in sizeFilterOptions"
+              :key="opt.value"
+              @click="sizeFilter = opt.value; showSizeMenu = false"
+              class="block w-full px-4 py-2 text-left text-xs font-bold transition-colors"
+              :class="
+                sizeFilter === opt.value
+                  ? 'text-indigo-600 dark:text-indigo-300'
+                  : 'text-gray-600 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-700/60'
+              "
+            >
+              {{ opt.label }}
+            </button>
+          </div>
+        </div>
+        <!-- 时间下拉 -->
+        <div class="relative hidden items-center gap-1.5 sm:flex">
+          <span class="text-gray-400 dark:text-gray-500">时间：</span>
+          <button
+            @click="showTimeMenu = !showTimeMenu; showBatchMenu = false; showSortMenu = false; showTypeMenu = false; showSizeMenu = false"
+            class="flex items-center gap-1 rounded-lg bg-gray-100 px-2.5 py-1.5 font-semibold text-gray-600 transition-colors hover:bg-gray-200 dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
+          >
+            {{ timeLabel }}
+            <ChevronDown
+              class="h-3 w-3 transition-transform"
+              :class="showTimeMenu ? 'rotate-180' : ''"
+            />
+          </button>
+          <div
+            v-if="showTimeMenu"
+            class="absolute left-10 top-full z-30 mt-2 w-32 overflow-hidden rounded-xl border border-gray-100 bg-white py-1.5 shadow-xl dark:border-gray-700 dark:bg-gray-800"
+          >
+            <button
+              v-for="opt in timeFilterOptions"
+              :key="opt.value"
+              @click="timeFilter = opt.value; showTimeMenu = false"
+              class="block w-full px-4 py-2 text-left text-xs font-bold transition-colors"
+              :class="
+                timeFilter === opt.value
+                  ? 'text-indigo-600 dark:text-indigo-300'
+                  : 'text-gray-600 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-700/60'
+              "
+            >
+              {{ opt.label }}
+            </button>
+          </div>
+        </div>
+        <!-- 移动端：筛选收纳入口 -->
+        <button
+          @click="openFilterSheet"
+          class="flex items-center gap-1 rounded-lg bg-gray-100 px-2.5 py-1.5 font-semibold text-gray-600 transition-colors hover:bg-gray-200 sm:hidden dark:bg-gray-800 dark:text-gray-300 dark:hover:bg-gray-700"
+        >
+          <SlidersHorizontal class="h-3 w-3" />
+          筛选<template v-if="activeFilterCount"> ({{ activeFilterCount }})</template>
+        </button>
+        <p class="ml-auto text-xs tabular-nums text-gray-400 dark:text-gray-500">
+          共 {{ filteredList.length }} 张图片
+        </p>
+      </div>
+
+      <!-- 筛选 Chip 行：生效条件一览，可单独移除 -->
+      <div
+        v-if="hasActiveFilters"
+        class="flex flex-wrap items-center gap-1.5 border-t border-gray-100 pt-3 dark:border-gray-800"
+      >
+        <button
+          v-if="keyword"
+          @click="keyword = ''"
+          class="flex items-center gap-1 rounded-full bg-indigo-50 px-2.5 py-1 text-[11px] font-semibold text-indigo-600 transition-colors hover:bg-indigo-100 dark:bg-indigo-500/15 dark:text-indigo-300"
+          title="移除搜索条件"
+        >
+          搜索: {{ keyword }}
+          <X class="h-3 w-3" />
+        </button>
+        <button
+          v-if="typeFilter !== 'all'"
+          @click="typeFilter = 'all'"
+          class="flex items-center gap-1 rounded-full bg-indigo-50 px-2.5 py-1 text-[11px] font-semibold text-indigo-600 transition-colors hover:bg-indigo-100 dark:bg-indigo-500/15 dark:text-indigo-300"
+          title="移除类型条件"
+        >
+          类型: {{ typeFilter.toUpperCase() }}
+          <X class="h-3 w-3" />
+        </button>
+        <button
+          v-if="sizeFilter !== 'all'"
+          @click="sizeFilter = 'all'"
+          class="flex items-center gap-1 rounded-full bg-indigo-50 px-2.5 py-1 text-[11px] font-semibold text-indigo-600 transition-colors hover:bg-indigo-100 dark:bg-indigo-500/15 dark:text-indigo-300"
+          title="移除大小条件"
+        >
+          大小: {{ sizeLabel }}
+          <X class="h-3 w-3" />
+        </button>
+        <button
+          v-if="timeFilter !== 'all'"
+          @click="timeFilter = 'all'"
+          class="flex items-center gap-1 rounded-full bg-indigo-50 px-2.5 py-1 text-[11px] font-semibold text-indigo-600 transition-colors hover:bg-indigo-100 dark:bg-indigo-500/15 dark:text-indigo-300"
+          title="移除时间条件"
+        >
+          时间: {{ timeLabel }}
+          <X class="h-3 w-3" />
+        </button>
+        <button
+          @click="clearFilters"
+          class="rounded-full px-2 py-1 text-[11px] font-semibold text-gray-400 transition-colors hover:text-gray-600 dark:hover:text-gray-200"
+        >
+          清空筛选
+        </button>
+      </div>
+    </div>
+
+    <!-- 导入 JSON 备份的隐藏文件选择框（批量操作菜单触发） -->
+    <input
+      ref="importInput"
+      type="file"
+      accept="application/json,.json"
+      class="hidden"
+      @change="handleImportFile"
+    />
+
+    <!-- 快捷键帮助 -->
+    <div
+      v-if="showShortcuts"
+      class="card flex flex-wrap items-center gap-x-5 gap-y-2 px-5 py-3 text-xs text-gray-500 dark:text-gray-400"
+    >
+      <span
+        ><kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800"
+          >↑</kbd
+        >/<kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800"
+          >↓</kbd
+        >
+        选择</span
+      >
+      <span
+        ><kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800"
+          >X</kbd
+        >
+        选中</span
+      >
+      <span
+        ><kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800"
+          >Enter</kbd
+        >
+        预览</span
+      >
+      <span
+        ><kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800"
+          >←</kbd
+        >/<kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800"
+          >→</kbd
+        >
+        预览切换</span
+      >
+      <span
+        ><kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800"
+          >F2</kbd
+        >
+        复制链接</span
+      >
+      <span
+        ><kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800"
+          >Del</kbd
+        >
+        删除</span
+      >
+      <span
+        ><kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800"
+          >/</kbd
+        >
+        搜索</span
+      >
+      <span
+        ><kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800"
+          >Ctrl+A</kbd
+        >
+        全选</span
+      >
+      <span
+        ><kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800"
+          >Esc</kbd
+        >
+        关闭弹层</span
+      >
+      <span
+        ><kbd class="rounded bg-gray-100 px-1.5 py-0.5 font-mono text-[10px] dark:bg-gray-800"
+          >?</kbd
+        >
+        显示/隐藏本卡</span
+      >
+    </div>
+
+    <!-- 批量操作工具栏：有选中项时出现 -->
+    <Transition
+      enter-active-class="transition duration-200 ease-out"
+      enter-from-class="opacity-0 -translate-y-2"
+      enter-to-class="opacity-100 translate-y-0"
+      leave-active-class="transition duration-150 ease-in"
+      leave-from-class="opacity-100 translate-y-0"
+      leave-to-class="opacity-0 -translate-y-2"
+    >
+      <div
+        v-if="selectMode || selectedList.length > 0"
+        class="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-indigo-200/60 bg-indigo-50/80 px-5 py-3 backdrop-blur-md max-md:fixed max-md:inset-x-3 max-md:bottom-[4.75rem] max-md:z-40 max-md:bg-indigo-50/95 max-md:shadow-2xl dark:border-indigo-500/20 dark:bg-indigo-900/30 dark:max-md:bg-gray-900/95"
+      >
+        <p class="relative text-sm font-semibold text-indigo-700 dark:text-indigo-300">
+          已选 <span class="font-bold">{{ selectedList.length }}</span
+          >{{ selectMode ? ` / ${filteredList.length} 张` : ' 项' }}
+          <span v-if="selectMode" class="relative ml-2 inline-block">
+            <button
+              @click="showSelectMenu = !showSelectMenu"
+              class="rounded-md bg-white px-2 py-1 text-xs font-semibold text-indigo-600 ring-1 ring-indigo-200 transition-colors hover:bg-indigo-100 dark:bg-gray-800 dark:text-indigo-300 dark:ring-indigo-500/30 dark:hover:bg-indigo-900/40"
+            >
+              全选
+              <ChevronDown
+                class="inline h-3 w-3 align-[-1px] transition-transform"
+                :class="showSelectMenu ? 'rotate-180' : ''"
+              />
+            </button>
+            <div
+              v-if="showSelectMenu"
+              class="absolute left-0 top-full z-30 mt-1 w-44 overflow-hidden rounded-xl border border-gray-100 bg-white py-1.5 shadow-xl dark:border-gray-700 dark:bg-gray-800"
+            >
+              <button
+                @click="selectPage(); showSelectMenu = false"
+                class="block w-full px-4 py-2 text-left text-xs font-semibold text-gray-600 transition-colors hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-700/60"
+              >
+                全选本页（{{ pagedList.length }}）
+              </button>
+              <button
+                @click="selectAllFiltered(); showSelectMenu = false"
+                class="block w-full px-4 py-2 text-left text-xs font-semibold text-gray-600 transition-colors hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-700/60"
+              >
+                全选全部（{{ filteredList.length }}）
+              </button>
+              <button
+                v-if="selectedList.length > 0"
+                @click="clearSelection(); showSelectMenu = false"
+                class="block w-full px-4 py-2 text-left text-xs font-semibold text-gray-600 transition-colors hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-700/60"
+              >
+                取消全选
+              </button>
+            </div>
+          </span>
+          <button
+            v-else
+            @click="clearSelection"
+            class="ml-2 text-xs font-medium text-gray-500 underline-offset-2 hover:underline dark:text-gray-400"
+          >
+            取消选择
+          </button>
+        </p>
+        <div v-if="selectedList.length > 0" class="flex flex-wrap items-center gap-2">
+          <template v-if="!trashMode">
+            <button
+              @click="copySelected('url')"
+              class="flex h-8 items-center gap-1.5 rounded-lg bg-white px-3 text-xs font-semibold text-gray-600 shadow-sm ring-1 ring-gray-200 transition-colors hover:bg-indigo-50 hover:text-indigo-600 dark:bg-gray-800 dark:text-gray-300 dark:ring-gray-700 dark:hover:bg-indigo-900/30 dark:hover:text-indigo-300"
+            >
+              <Copy class="h-3.5 w-3.5" />
+              复制选中链接
+            </button>
+            <button
+              @click="copySelected('markdown')"
+              class="flex h-8 items-center gap-1.5 rounded-lg bg-white px-3 text-xs font-semibold text-gray-600 shadow-sm ring-1 ring-gray-200 transition-colors hover:bg-indigo-50 hover:text-indigo-600 dark:bg-gray-800 dark:text-gray-300 dark:ring-gray-700 dark:hover:bg-indigo-900/30 dark:hover:text-indigo-300"
+            >
+              <Braces class="h-3.5 w-3.5" />
+              复制 Markdown
+            </button>
+            <button
+              @click="copySelected('html')"
+              class="flex h-8 items-center gap-1.5 rounded-lg bg-white px-3 text-xs font-semibold text-gray-600 shadow-sm ring-1 ring-gray-200 transition-colors hover:bg-indigo-50 hover:text-indigo-600 dark:bg-gray-800 dark:text-gray-300 dark:ring-gray-700 dark:hover:bg-indigo-900/30 dark:hover:text-indigo-300"
+            >
+              <Code2 class="h-3.5 w-3.5" />
+              复制 HTML
+            </button>
+            <button
+              @click="copySelected('bbcode')"
+              class="flex h-8 items-center gap-1.5 rounded-lg bg-white px-3 text-xs font-semibold text-gray-600 shadow-sm ring-1 ring-gray-200 transition-colors hover:bg-indigo-50 hover:text-indigo-600 dark:bg-gray-800 dark:text-gray-300 dark:ring-gray-700 dark:hover:bg-indigo-900/30 dark:hover:text-indigo-300"
+            >
+              <Code2 class="h-3.5 w-3.5" />
+              BBCode
+            </button>
+          </template>
+          <button
+            v-if="trashMode"
+            @click="restoreBatch"
+            class="flex h-8 items-center gap-1.5 rounded-lg bg-emerald-500 px-3 text-xs font-bold text-white shadow-sm transition-colors hover:bg-emerald-600"
+          >
+            <ArchiveRestore class="h-3.5 w-3.5" />
+            恢复选中 ({{ selectedList.length }})
+          </button>
+          <button
+            @click="askBatchDelete"
+            :disabled="batchDeleting"
+            class="flex h-8 items-center gap-1.5 rounded-lg bg-red-500 px-3 text-xs font-bold text-white shadow-sm transition-colors hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Trash2 class="h-3.5 w-3.5" />
+            {{ trashMode ? '彻底删除' : '删除选中' }} ({{ selectedList.length }})
+          </button>
+        </div>
+      </div>
+    </Transition>
+
+    <!-- ========== 网格视图（默认，与目标图一致） ========== -->
+    <template v-if="viewMode === 'grid'">
+      <div v-if="loading" :class="gridClass">
+        <div v-for="i in 8" :key="i" class="card overflow-hidden">
+          <div class="aspect-[4/3] shimmer-placeholder" />
+          <div class="space-y-2 p-3">
+            <div class="h-3.5 w-2/3 rounded-full shimmer-placeholder" />
+            <div class="h-3 w-1/2 rounded-full shimmer-placeholder" />
+          </div>
+        </div>
+      </div>
+
+      <div
+        v-else-if="filteredList.length === 0"
+        class="card flex flex-col items-center justify-center gap-2 p-16 text-center sm:p-20"
+      >
+        <FileImage class="h-14 w-14 text-gray-300 opacity-60 dark:text-gray-600" />
+        <p class="text-base font-semibold text-gray-500 dark:text-gray-400">
+          {{ hasActiveFilters ? '没有匹配的图片' : trashMode ? '回收站是空的' : '暂无上传记录' }}
+        </p>
+        <p v-if="hasActiveFilters" class="text-xs text-gray-400 dark:text-gray-500">换个条件试试</p>
+        <button
+          v-if="hasActiveFilters"
+          @click="clearFilters"
+          class="mt-3 rounded-xl bg-indigo-50 px-4 py-2 text-xs font-bold text-indigo-600 transition-colors hover:bg-indigo-100 dark:bg-indigo-500/15 dark:text-indigo-300 dark:hover:bg-indigo-500/25"
+        >
+          清除筛选
+        </button>
+        <RouterLink
+          v-if="!hasActiveFilters && !trashMode"
+          to="/"
+          class="brand-gradient mt-4 rounded-xl px-5 py-2.5 text-sm font-bold text-white shadow-lg shadow-indigo-500/30 transition-all hover:-translate-y-0.5 hover:brightness-110"
+        >
+          去上传第一张图
+        </RouterLink>
+      </div>
+
+      <TransitionGroup v-else name="card-list" tag="div" :class="gridClass">
+        <div
+          v-for="(item, idx) in pagedList"
+          :key="item.id"
+          class="card group overflow-hidden transition-all"
+          :class="[
+            isSelected(item.id) ? 'ring-2 ring-indigo-500 dark:ring-indigo-400' : 'hover:shadow-lg',
+            focusIndex === (page - 1) * pageSize + idx ? 'ring-2 ring-indigo-400/60' : '',
+          ]"
+        >
+          <!-- 缩略图区：hover 露出 checkbox + … 菜单；左下格式 badge；右下快捷复制 -->
+          <div class="relative aspect-[4/3] overflow-hidden bg-gray-100 dark:bg-gray-800">
+            <button
+              @click="onThumbClick(item, $event)"
+              @touchstart="onThumbTouchStart(item, $event)"
+              @touchmove="onThumbTouchMove"
+              @touchend="onThumbTouchEnd"
+              @contextmenu.prevent
+              class="block h-full w-full"
+              :class="selectMode ? 'cursor-pointer' : 'cursor-zoom-in'"
+              :title="selectMode ? '点击选择' : '点击查看大图'"
+            >
+              <img
+                v-if="isImageType(item.type, item.name)"
+                :src="item.thumbnailUrl || item.url"
+                :alt="item.name"
+                :width="item.width"
+                :height="item.height"
+                loading="lazy"
+                decoding="async"
+                @error="onThumbError"
+                class="h-full w-full select-none object-cover transition-transform duration-300 group-hover:scale-105"
+              />
+              <!-- 非图片：文件图标（浏览模式点击新窗口下载；选择模式仍可点选） -->
+              <div v-else class="flex h-full w-full items-center justify-center">
+                <FileText class="h-10 w-10 text-gray-300 dark:text-gray-600" />
+              </div>
+            </button>
+            <!-- 左上：多选指示器（浏览模式 hover 露出的 checkbox / 选择模式常显指示器） -->
+            <label
+              v-if="!selectMode"
+              class="absolute left-2.5 top-2.5 flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg bg-white/90 shadow-sm backdrop-blur transition-opacity dark:bg-gray-900/80"
+              :class="
+                isSelected(item.id)
+                  ? 'opacity-100'
+                  : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'
+              "
+              @click.stop
+            >
+              <input
+                type="checkbox"
+                :checked="isSelected(item.id)"
+                @change="toggleSelect(item.id)"
+                class="h-4 w-4 cursor-pointer accent-indigo-600"
+                title="选择此项"
+              />
+            </label>
+            <div
+              v-else
+              class="absolute left-2.5 top-2.5 flex h-7 w-7 items-center justify-center rounded-lg shadow-sm backdrop-blur transition-all"
+              :class="
+                isSelected(item.id)
+                  ? 'bg-indigo-600 text-white'
+                  : 'border-2 border-white/90 bg-white/70 dark:border-gray-300/70 dark:bg-gray-900/50'
+              "
+            >
+              <Check v-if="isSelected(item.id)" class="h-4 w-4" />
+            </div>
+            <!-- 右上：选择模式为预览按钮；浏览模式为 … 更多菜单 -->
+            <div class="absolute right-2.5 top-2.5">
+              <button
+                v-if="selectMode"
+                @click.stop="lightboxItem = item"
+                class="flex h-7 w-7 items-center justify-center rounded-lg bg-white/90 text-gray-500 shadow-sm backdrop-blur transition-all hover:text-gray-800 dark:bg-gray-900/80 dark:text-gray-400 dark:hover:text-gray-100"
+                title="预览大图"
+              >
+                <ZoomIn class="h-4 w-4" />
+              </button>
+              <template v-else>
                 <button
-                  @click="onThumbClick(item, $event)"
-                  @touchstart="onThumbTouchStart(item, $event)"
-                  @touchmove="onThumbTouchMove"
-                  @touchend="onThumbTouchEnd"
-                  @contextmenu.prevent
-                  class="block h-full w-full"
-                  :class="selectMode ? 'cursor-pointer' : 'cursor-zoom-in'"
-                  :title="selectMode ? '点击选择' : '点击查看大图'"
+                  @click.stop="openMenuId = openMenuId === item.id ? null : item.id"
+                  class="flex h-7 w-7 items-center justify-center rounded-lg bg-white/90 text-gray-500 shadow-sm backdrop-blur transition-all hover:text-gray-800 dark:bg-gray-900/80 dark:text-gray-400 dark:hover:text-gray-100"
+                  :class="
+                    openMenuId === item.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+                  "
+                  title="更多操作"
                 >
-                  <img
-                    v-if="isImageType(item.type, item.name)"
-                    :src="item.thumbnailUrl || item.url"
-                    :alt="item.name"
-                    :width="item.width"
-                    :height="item.height"
-                    loading="lazy"
-                    decoding="async"
-                    @error="onThumbError"
-                    class="h-full w-full select-none object-cover transition-transform duration-300 group-hover:scale-105"
-                  />
-                  <!-- 非图片：文件图标（浏览模式点击新窗口下载；选择模式仍可点选） -->
-                  <div v-else class="flex h-full w-full items-center justify-center">
-                    <FileText class="h-10 w-10 text-gray-300 dark:text-gray-600" />
-                  </div>
+                  <MoreHorizontal class="h-4 w-4" />
                 </button>
-                <!-- 左上：多选指示器（浏览模式 hover 露出的 checkbox / 选择模式常显指示器） -->
-                <label
-                  v-if="!selectMode"
-                  class="absolute left-2.5 top-2.5 flex h-7 w-7 cursor-pointer items-center justify-center rounded-lg bg-white/90 shadow-sm backdrop-blur transition-opacity dark:bg-gray-900/80"
-                  :class="isSelected(item.id) ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'"
-                  @click.stop
-                >
-                  <input
-                    type="checkbox"
-                    :checked="isSelected(item.id)"
-                    @change="toggleSelect(item.id)"
-                    class="h-4 w-4 cursor-pointer accent-indigo-600"
-                    title="选择此项"
-                  />
-                </label>
-                <div
-                  v-else
-                  class="absolute left-2.5 top-2.5 flex h-7 w-7 items-center justify-center rounded-lg shadow-sm backdrop-blur transition-all"
-                  :class="isSelected(item.id) ? 'bg-indigo-600 text-white' : 'border-2 border-white/90 bg-white/70 dark:border-gray-300/70 dark:bg-gray-900/50'"
-                >
-                  <Check v-if="isSelected(item.id)" class="h-4 w-4" />
-                </div>
-                <!-- 右上：选择模式为预览按钮；浏览模式为 … 更多菜单 -->
-                <div class="absolute right-2.5 top-2.5">
-                  <button
-                    v-if="selectMode"
-                    @click.stop="lightboxItem = item"
-                    class="flex h-7 w-7 items-center justify-center rounded-lg bg-white/90 text-gray-500 shadow-sm backdrop-blur transition-all hover:text-gray-800 dark:bg-gray-900/80 dark:text-gray-400 dark:hover:text-gray-100"
-                    title="预览大图"
-                  >
-                    <ZoomIn class="h-4 w-4" />
-                  </button>
-                  <template v-else>
-                    <button
-                    @click.stop="openMenuId = openMenuId === item.id ? null : item.id"
-                    class="flex h-7 w-7 items-center justify-center rounded-lg bg-white/90 text-gray-500 shadow-sm backdrop-blur transition-all hover:text-gray-800 dark:bg-gray-900/80 dark:text-gray-400 dark:hover:text-gray-100"
-                    :class="openMenuId === item.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'"
-                    title="更多操作"
-                  >
-                    <MoreHorizontal class="h-4 w-4" />
-                  </button>
                 <Transition
                   enter-active-class="transition duration-150 ease-out"
                   enter-from-class="opacity-0 -translate-y-1"
@@ -1696,107 +1911,151 @@ onUnmounted(() => {
                     </button>
                   </div>
                 </Transition>
-                  </template>
-              </div>
-              <!-- 左下：格式 badge -->
-              <span class="absolute bottom-2.5 left-2.5 rounded-md bg-black/45 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white backdrop-blur-sm">
-                {{ (item.type || '').split('/')[1] || 'img' }}
-              </span>
-              <!-- 右下：快捷复制链接 -->
+              </template>
+            </div>
+            <!-- 左下：格式 badge -->
+            <span
+              class="absolute bottom-2.5 left-2.5 rounded-md bg-black/45 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white backdrop-blur-sm"
+            >
+              {{ (item.type || '').split('/')[1] || 'img' }}
+            </span>
+            <!-- 右下：快捷复制链接 -->
+            <button
+              v-if="!trashMode"
+              @click.stop="copyFormat(item, 'url')"
+              title="复制链接"
+              class="absolute bottom-2 right-2 flex h-7 w-7 items-center justify-center rounded-lg bg-white/90 text-gray-500 opacity-0 shadow-sm backdrop-blur transition-all hover:text-indigo-600 group-hover:opacity-100 dark:bg-gray-900/80 dark:text-gray-400 dark:hover:text-indigo-300"
+            >
+              <Check
+                v-if="copiedRecordId?.id === item.id && copiedRecordId?.key === 'url'"
+                class="h-3.5 w-3.5 text-emerald-500"
+              />
+              <LinkIcon v-else class="h-3.5 w-3.5" />
+            </button>
+            <button
+              v-else
+              @click.stop="restoreItem(item)"
+              title="恢复"
+              class="absolute bottom-2 right-2 flex h-7 w-7 items-center justify-center rounded-lg bg-white/90 text-gray-500 opacity-0 shadow-sm backdrop-blur transition-all hover:text-emerald-600 group-hover:opacity-100 dark:bg-gray-900/80 dark:text-gray-400 dark:hover:text-emerald-400"
+            >
+              <ArchiveRestore class="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <!-- 信息区：文件名 + 大小/时间 + 底部四操作 -->
+          <div class="p-3">
+            <p
+              class="truncate text-xs font-semibold text-gray-800 sm:text-sm dark:text-gray-100"
+              :title="item.name"
+            >
+              <span
+                v-if="!trashMode && isNewRecord(item)"
+                class="mr-1 inline-block rounded bg-indigo-500 px-1 align-middle text-[9px] font-bold leading-4 text-white"
+                >新</span
+              ><template v-for="(seg, i) in highlightName(item.name)" :key="i"
+                ><mark
+                  v-if="seg.hit"
+                  class="rounded-sm bg-amber-200/70 px-0.5 text-inherit dark:bg-amber-500/30"
+                  >{{ seg.text }}</mark
+                ><template v-else>{{ seg.text }}</template></template
+              >
+            </p>
+            <p
+              class="mt-1 flex items-center gap-1.5 text-[11px] tabular-nums text-gray-400 dark:text-gray-500"
+            >
+              <span>{{ formatSize(item.size) }}</span>
+              <span>{{ formatDate(item.createdAt) }}</span>
+              <span
+                v-if="trashMode && item.deletedAt"
+                class="rounded-full px-1.5 py-0.5 font-semibold"
+                :class="daysLeftClass(item.deletedAt)"
+                >剩 {{ daysLeft(item.deletedAt) }} 天</span
+              >
+            </p>
+            <div
+              class="mt-2 flex items-center gap-0.5 border-t border-gray-100 pt-2 dark:border-gray-800"
+            >
               <button
                 v-if="!trashMode"
-                @click.stop="copyFormat(item, 'url')"
+                @click="copyFormat(item, 'url')"
                 title="复制链接"
-                class="absolute bottom-2 right-2 flex h-7 w-7 items-center justify-center rounded-lg bg-white/90 text-gray-500 opacity-0 shadow-sm backdrop-blur transition-all hover:text-indigo-600 group-hover:opacity-100 dark:bg-gray-900/80 dark:text-gray-400 dark:hover:text-indigo-300"
+                class="flex h-8 flex-1 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-indigo-50 hover:text-indigo-600 dark:hover:bg-indigo-500/15 dark:hover:text-indigo-300"
+                :class="
+                  copiedRecordId?.id === item.id && copiedRecordId?.key === 'url'
+                    ? 'text-emerald-500 dark:text-emerald-400'
+                    : ''
+                "
               >
-                <Check v-if="copiedRecordId?.id === item.id && copiedRecordId?.key === 'url'" class="h-3.5 w-3.5 text-emerald-500" />
-                <LinkIcon v-else class="h-3.5 w-3.5" />
+                <Check
+                  v-if="copiedRecordId?.id === item.id && copiedRecordId?.key === 'url'"
+                  class="h-4 w-4 text-emerald-500"
+                />
+                <LinkIcon v-else class="h-4 w-4" />
               </button>
               <button
-                v-else
-                @click.stop="restoreItem(item)"
-                title="恢复"
-                class="absolute bottom-2 right-2 flex h-7 w-7 items-center justify-center rounded-lg bg-white/90 text-gray-500 opacity-0 shadow-sm backdrop-blur transition-all hover:text-emerald-600 group-hover:opacity-100 dark:bg-gray-900/80 dark:text-gray-400 dark:hover:text-emerald-400"
+                v-if="!trashMode"
+                @click="copyFormat(item, 'markdown')"
+                title="复制 Markdown"
+                class="flex h-8 flex-1 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-indigo-50 hover:text-indigo-600 dark:hover:bg-indigo-500/15 dark:hover:text-indigo-300"
+                :class="
+                  copiedRecordId?.id === item.id && copiedRecordId?.key === 'markdown'
+                    ? 'text-emerald-500 dark:text-emerald-400'
+                    : ''
+                "
               >
-                <ArchiveRestore class="h-3.5 w-3.5" />
+                <Check
+                  v-if="copiedRecordId?.id === item.id && copiedRecordId?.key === 'markdown'"
+                  class="h-4 w-4 text-emerald-500"
+                />
+                <Copy v-else class="h-4 w-4" />
+              </button>
+              <button
+                v-if="!trashMode"
+                @click="copyFormat(item, 'html')"
+                title="复制 HTML"
+                class="flex h-8 flex-1 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-indigo-50 hover:text-indigo-600 dark:hover:bg-indigo-500/15 dark:hover:text-indigo-300"
+                :class="
+                  copiedRecordId?.id === item.id && copiedRecordId?.key === 'html'
+                    ? 'text-emerald-500 dark:text-emerald-400'
+                    : ''
+                "
+              >
+                <Check
+                  v-if="copiedRecordId?.id === item.id && copiedRecordId?.key === 'html'"
+                  class="h-4 w-4 text-emerald-500"
+                />
+                <Braces v-else class="h-4 w-4" />
+              </button>
+              <button
+                v-if="trashMode"
+                @click="restoreItem(item)"
+                title="恢复"
+                class="flex h-8 flex-1 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-emerald-50 hover:text-emerald-600 dark:hover:bg-emerald-500/10 dark:hover:text-emerald-400"
+              >
+                <ArchiveRestore class="h-4 w-4" />
+              </button>
+              <button
+                @click="trashMode ? (pendingDelete = item) : softDelete(item)"
+                :title="trashMode ? '彻底删除' : '移入回收站'"
+                class="flex h-8 flex-1 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10 dark:hover:text-red-400"
+              >
+                <Trash2 class="h-4 w-4" />
               </button>
             </div>
-            <!-- 信息区：文件名 + 大小/时间 + 底部四操作 -->
-            <div class="p-3">
-              <p class="truncate text-xs font-semibold text-gray-800 sm:text-sm dark:text-gray-100" :title="item.name">
-                <span v-if="!trashMode && isNewRecord(item)" class="mr-1 inline-block rounded bg-indigo-500 px-1 align-middle text-[9px] font-bold leading-4 text-white">新</span><template v-for="(seg, i) in highlightName(item.name)" :key="i"><mark v-if="seg.hit" class="rounded-sm bg-amber-200/70 px-0.5 text-inherit dark:bg-amber-500/30">{{ seg.text }}</mark><template v-else>{{ seg.text }}</template></template>
-              </p>
-              <p class="mt-1 flex items-center gap-1.5 text-[11px] tabular-nums text-gray-400 dark:text-gray-500">
-                <span>{{ formatSize(item.size) }}</span>
-                <span>{{ formatDate(item.createdAt) }}</span>
-                <span
-                  v-if="trashMode && item.deletedAt"
-                  class="rounded-full px-1.5 py-0.5 font-semibold"
-                  :class="daysLeftClass(item.deletedAt)"
-                >剩 {{ daysLeft(item.deletedAt) }} 天</span>
-              </p>
-              <div class="mt-2 flex items-center gap-0.5 border-t border-gray-100 pt-2 dark:border-gray-800">
-                <button
-                  v-if="!trashMode"
-                  @click="copyFormat(item, 'url')"
-                  title="复制链接"
-                  class="flex h-8 flex-1 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-indigo-50 hover:text-indigo-600 dark:hover:bg-indigo-500/15 dark:hover:text-indigo-300"
-                  :class="copiedRecordId?.id === item.id && copiedRecordId?.key === 'url' ? 'text-emerald-500 dark:text-emerald-400' : ''"
-                >
-                  <Check v-if="copiedRecordId?.id === item.id && copiedRecordId?.key === 'url'" class="h-4 w-4 text-emerald-500" />
-                  <LinkIcon v-else class="h-4 w-4" />
-                </button>
-                <button
-                  v-if="!trashMode"
-                  @click="copyFormat(item, 'markdown')"
-                  title="复制 Markdown"
-                  class="flex h-8 flex-1 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-indigo-50 hover:text-indigo-600 dark:hover:bg-indigo-500/15 dark:hover:text-indigo-300"
-                  :class="copiedRecordId?.id === item.id && copiedRecordId?.key === 'markdown' ? 'text-emerald-500 dark:text-emerald-400' : ''"
-                >
-                  <Check v-if="copiedRecordId?.id === item.id && copiedRecordId?.key === 'markdown'" class="h-4 w-4 text-emerald-500" />
-                  <Copy v-else class="h-4 w-4" />
-                </button>
-                <button
-                  v-if="!trashMode"
-                  @click="copyFormat(item, 'html')"
-                  title="复制 HTML"
-                  class="flex h-8 flex-1 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-indigo-50 hover:text-indigo-600 dark:hover:bg-indigo-500/15 dark:hover:text-indigo-300"
-                  :class="copiedRecordId?.id === item.id && copiedRecordId?.key === 'html' ? 'text-emerald-500 dark:text-emerald-400' : ''"
-                >
-                  <Check v-if="copiedRecordId?.id === item.id && copiedRecordId?.key === 'html'" class="h-4 w-4 text-emerald-500" />
-                  <Braces v-else class="h-4 w-4" />
-                </button>
-                <button
-                  v-if="trashMode"
-                  @click="restoreItem(item)"
-                  title="恢复"
-                  class="flex h-8 flex-1 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-emerald-50 hover:text-emerald-600 dark:hover:bg-emerald-500/10 dark:hover:text-emerald-400"
-                >
-                  <ArchiveRestore class="h-4 w-4" />
-                </button>
-                <button
-                  @click="trashMode ? (pendingDelete = item) : softDelete(item)"
-                  :title="trashMode ? '彻底删除' : '移入回收站'"
-                  class="flex h-8 flex-1 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10 dark:hover:text-red-400"
-                >
-                  <Trash2 class="h-4 w-4" />
-                </button>
-              </div>
-            </div>
           </div>
-        </TransitionGroup>
+        </div>
+      </TransitionGroup>
 
-        <!-- 网格分页 -->
-        <PaginationBar
-          v-if="!loading && filteredList.length > 0"
-          v-model:page="page"
-          :total-pages="totalPages"
-          :total="filteredList.length"
-        />
-      </template>
+      <!-- 网格分页 -->
+      <PaginationBar
+        v-if="!loading && filteredList.length > 0"
+        v-model:page="page"
+        :total-pages="totalPages"
+        :total="filteredList.length"
+      />
+    </template>
 
-      <!-- ========== 列表视图（原有行布局，保留键盘导航/复选框/分页） ========== -->
-      <template v-else>
+    <!-- ========== 列表视图（原有行布局，保留键盘导航/复选框/分页） ========== -->
+    <template v-else>
       <div class="card overflow-hidden">
         <div v-if="loading" class="space-y-4 p-6">
           <!-- 骨架屏：模拟真实行高扫光动效，加载完不跳动 -->
@@ -1811,9 +2070,14 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <div v-else-if="filteredList.length === 0" class="flex flex-col items-center justify-center p-20 text-gray-400 dark:text-gray-600">
+        <div
+          v-else-if="filteredList.length === 0"
+          class="flex flex-col items-center justify-center p-20 text-gray-400 dark:text-gray-600"
+        >
           <FileImage class="mb-4 h-16 w-16 opacity-20" />
-          <p class="text-lg font-medium">{{ hasActiveFilters ? '没有匹配的图片' : trashMode ? '回收站是空的' : '暂无上传记录' }}</p>
+          <p class="text-lg font-medium">
+            {{ hasActiveFilters ? '没有匹配的图片' : trashMode ? '回收站是空的' : '暂无上传记录' }}
+          </p>
           <p v-if="hasActiveFilters" class="mt-1 text-sm">换个条件试试</p>
           <button
             v-if="hasActiveFilters"
@@ -1833,14 +2097,22 @@ onUnmounted(() => {
 
         <template v-else>
           <!-- 单列表自适应布局：桌面/移动端同一结构 (FLIP 列表动效) -->
-          <TransitionGroup name="card-list" tag="div" class="divide-y divide-gray-100/50 dark:divide-gray-800/50">
+          <TransitionGroup
+            name="card-list"
+            tag="div"
+            class="divide-y divide-gray-100/50 dark:divide-gray-800/50"
+          >
             <div
               v-for="(item, idx) in pagedList"
               :key="item.id"
               class="flex items-center gap-3 px-3 py-3 transition-colors sm:px-5"
               :class="[
-                isSelected(item.id) ? 'bg-indigo-50/50 dark:bg-indigo-900/20' : 'hover:bg-indigo-50/30 dark:hover:bg-indigo-900/10',
-                focusIndex === ((page - 1) * pageSize + idx) ? 'ring-1 ring-inset ring-indigo-400/60' : '',
+                isSelected(item.id)
+                  ? 'bg-indigo-50/50 dark:bg-indigo-900/20'
+                  : 'hover:bg-indigo-50/30 dark:hover:bg-indigo-900/10',
+                focusIndex === (page - 1) * pageSize + idx
+                  ? 'ring-1 ring-inset ring-indigo-400/60'
+                  : '',
               ]"
             >
               <input
@@ -1879,32 +2151,62 @@ onUnmounted(() => {
 
               <!-- 文件名 + 链接（弹性主列，最小宽度 0 才能正确截断） -->
               <div class="min-w-0 flex-1">
-                <p class="truncate text-sm font-medium text-gray-900 dark:text-gray-100" :title="item.name">
-                  <span v-if="!trashMode && isNewRecord(item)" class="mr-1 inline-block rounded bg-indigo-500 px-1 align-middle text-[9px] font-bold leading-4 text-white">新</span><template v-for="(seg, i) in highlightName(item.name)" :key="i"><mark v-if="seg.hit" class="rounded-sm bg-amber-200/70 px-0.5 text-inherit dark:bg-amber-500/30">{{ seg.text }}</mark><template v-else>{{ seg.text }}</template></template>
+                <p
+                  class="truncate text-sm font-medium text-gray-900 dark:text-gray-100"
+                  :title="item.name"
+                >
+                  <span
+                    v-if="!trashMode && isNewRecord(item)"
+                    class="mr-1 inline-block rounded bg-indigo-500 px-1 align-middle text-[9px] font-bold leading-4 text-white"
+                    >新</span
+                  ><template v-for="(seg, i) in highlightName(item.name)" :key="i"
+                    ><mark
+                      v-if="seg.hit"
+                      class="rounded-sm bg-amber-200/70 px-0.5 text-inherit dark:bg-amber-500/30"
+                      >{{ seg.text }}</mark
+                    ><template v-else>{{ seg.text }}</template></template
+                  >
                 </p>
-                <div class="mt-0.5 flex items-center gap-2 text-xs text-gray-400 dark:text-gray-500">
-                  <a :href="item.url" target="_blank" rel="noopener noreferrer" class="inline-flex shrink-0 items-center gap-0.5 text-indigo-600 hover:underline dark:text-indigo-400">
-                    {{ isImageType(item.type, item.name) ? '查看原图' : '下载文件' }} <ExternalLink class="h-3 w-3" />
+                <div
+                  class="mt-0.5 flex items-center gap-2 text-xs text-gray-400 dark:text-gray-500"
+                >
+                  <a
+                    :href="item.url"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="inline-flex shrink-0 items-center gap-0.5 text-indigo-600 hover:underline dark:text-indigo-400"
+                  >
+                    {{ isImageType(item.type, item.name) ? '查看原图' : '下载文件' }}
+                    <ExternalLink class="h-3 w-3" />
                   </a>
                   <span class="whitespace-nowrap tabular-nums">{{ formatSize(item.size) }}</span>
                   <!-- 中屏起显示尺寸与格式 -->
-                  <span v-if="item.width" class="hidden whitespace-nowrap tabular-nums lg:inline">{{ item.width }}×{{ item.height }}</span>
-                  <span class="hidden rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-gray-500 md:inline dark:bg-gray-800 dark:text-gray-400">
+                  <span v-if="item.width" class="hidden whitespace-nowrap tabular-nums lg:inline"
+                    >{{ item.width }}×{{ item.height }}</span
+                  >
+                  <span
+                    class="hidden rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-gray-500 md:inline dark:bg-gray-800 dark:text-gray-400"
+                  >
                     {{ (item.type || '').split('/')[1] }}
                   </span>
                   <!-- 大屏显示时间 -->
-                  <span class="hidden whitespace-nowrap tabular-nums xl:inline">{{ formatDate(item.createdAt) }}</span>
+                  <span class="hidden whitespace-nowrap tabular-nums xl:inline">{{
+                    formatDate(item.createdAt)
+                  }}</span>
                   <!-- 回收站：剩余保留天数 -->
                   <span
                     v-if="trashMode && item.deletedAt"
                     class="rounded-full px-1.5 py-0.5 text-[10px] font-semibold"
                     :class="daysLeftClass(item.deletedAt)"
-                  >剩 {{ daysLeft(item.deletedAt) }} 天</span>
+                    >剩 {{ daysLeft(item.deletedAt) }} 天</span
+                  >
                 </div>
               </div>
 
               <!-- 时间（中屏辅助列） -->
-              <span class="hidden shrink-0 whitespace-nowrap tabular-nums text-xs text-gray-400 md:block xl:hidden dark:text-gray-500">
+              <span
+                class="hidden shrink-0 whitespace-nowrap tabular-nums text-xs text-gray-400 md:block xl:hidden dark:text-gray-500"
+              >
                 {{ formatDate(item.createdAt) }}
               </span>
 
@@ -1914,20 +2216,34 @@ onUnmounted(() => {
                   v-if="!trashMode"
                   @click="copyFormat(item, 'url')"
                   class="rounded-lg p-2 text-gray-400 hover:bg-indigo-50 hover:text-indigo-600 transition dark:text-gray-500 dark:hover:bg-indigo-900/20 dark:hover:text-indigo-400"
-                  :class="copiedRecordId?.id === item.id && copiedRecordId?.key === 'url' ? 'text-emerald-500 dark:text-emerald-400' : ''"
+                  :class="
+                    copiedRecordId?.id === item.id && copiedRecordId?.key === 'url'
+                      ? 'text-emerald-500 dark:text-emerald-400'
+                      : ''
+                  "
                   title="复制链接"
                 >
-                  <Check v-if="copiedRecordId?.id === item.id && copiedRecordId?.key === 'url'" class="h-4 w-4 text-emerald-500" />
+                  <Check
+                    v-if="copiedRecordId?.id === item.id && copiedRecordId?.key === 'url'"
+                    class="h-4 w-4 text-emerald-500"
+                  />
                   <Copy v-else class="h-4 w-4" />
                 </button>
                 <button
                   v-if="!trashMode"
                   @click="copyFormat(item, 'markdown')"
                   class="rounded-lg p-2 text-gray-400 hover:bg-indigo-50 hover:text-indigo-600 transition dark:text-gray-500 dark:hover:bg-indigo-900/20 dark:hover:text-indigo-400"
-                  :class="copiedRecordId?.id === item.id && copiedRecordId?.key === 'markdown' ? 'text-emerald-500 dark:text-emerald-400' : ''"
+                  :class="
+                    copiedRecordId?.id === item.id && copiedRecordId?.key === 'markdown'
+                      ? 'text-emerald-500 dark:text-emerald-400'
+                      : ''
+                  "
                   title="复制 Markdown"
                 >
-                  <Check v-if="copiedRecordId?.id === item.id && copiedRecordId?.key === 'markdown'" class="h-4 w-4 text-emerald-500" />
+                  <Check
+                    v-if="copiedRecordId?.id === item.id && copiedRecordId?.key === 'markdown'"
+                    class="h-4 w-4 text-emerald-500"
+                  />
                   <Braces v-else class="h-4 w-4" />
                 </button>
                 <button
@@ -1959,25 +2275,36 @@ onUnmounted(() => {
           />
         </template>
       </div>
-      </template>
+    </template>
 
-      <!-- 点任意空白关闭下拉 / 卡片菜单：菜单本身 stop 冒泡，只有遮罩能关 -->
-      <div
-        v-if="showBatchMenu || showSortMenu || showTypeMenu || showSizeMenu || showTimeMenu || showSelectMenu || openMenuId"
-        class="fixed inset-0 z-20 cursor-default"
-        @click="closeMenus"
-      />
+    <!-- 点任意空白关闭下拉 / 卡片菜单：菜单本身 stop 冒泡，只有遮罩能关 -->
+    <div
+      v-if="
+        showBatchMenu ||
+        showSortMenu ||
+        showTypeMenu ||
+        showSizeMenu ||
+        showTimeMenu ||
+        showSelectMenu ||
+        openMenuId
+      "
+      class="fixed inset-0 z-20 cursor-default"
+      @click="closeMenus"
+    />
 
-      <div class="mt-2 flex items-start gap-3 rounded-2xl border border-indigo-100 bg-indigo-50/50 p-4 text-sm text-indigo-700 dark:border-indigo-900/30 dark:bg-indigo-900/10 dark:text-indigo-300">
-        <AlertCircle class="h-5 w-5 shrink-0 mt-0.5" />
-        <p>
-          {{ trashMode
+    <div
+      class="mt-2 flex items-start gap-3 rounded-2xl border border-indigo-100 bg-indigo-50/50 p-4 text-sm text-indigo-700 dark:border-indigo-900/30 dark:bg-indigo-900/10 dark:text-indigo-300"
+    >
+      <AlertCircle class="h-5 w-5 shrink-0 mt-0.5" />
+      <p>
+        {{
+          trashMode
             ? '回收站中的记录保留 30 天，到期自动清除并联动删除源文件（多存储按记录标记分流，CNB 与 S3 桶都会清理）；「彻底删除」行为相同，个别删除失败时仅移除记录，可用「孤儿清理」页兜底清理。'
-            : '删除会移入回收站（保留 30 天，可随时恢复）；彻底删除或到期自动清除时才会同步删除源文件。' }}
-        </p>
-      </div>
+            : '删除会移入回收站（保留 30 天，可随时恢复）；彻底删除或到期自动清除时才会同步删除源文件。'
+        }}
+      </p>
     </div>
-  </AppShell>
+  </div>
 
   <!-- 弹层统一 Teleport 到 body：祖先的 backdrop-filter 会劫持 fixed 定位 -->
   <Teleport to="body">
@@ -1991,12 +2318,19 @@ onUnmounted(() => {
       leave-to-class="opacity-0"
     >
       <div v-if="lightboxItem" class="fixed inset-0 z-[60] flex items-center justify-center p-4">
-        <div class="absolute inset-0 bg-gray-900/70 backdrop-blur-sm" @click="lightboxItem = null"></div>
+        <div
+          class="absolute inset-0 bg-gray-900/70 backdrop-blur-sm"
+          @click="lightboxItem = null"
+        ></div>
         <div class="relative flex max-h-full max-w-full flex-col items-center">
           <!-- 顶行：位置指示 + 文件名 + 关闭 -->
           <div class="mb-2 flex w-full items-center gap-3 text-xs font-semibold text-white/80">
-            <span class="shrink-0 tabular-nums">{{ lightboxIndex >= 0 ? lightboxIndex + 1 : '—' }} / {{ filteredList.length }}</span>
-            <span class="min-w-0 flex-1 truncate" :title="lightboxItem.name">{{ lightboxItem.name }}</span>
+            <span class="shrink-0 tabular-nums"
+              >{{ lightboxIndex >= 0 ? lightboxIndex + 1 : '—' }} / {{ filteredList.length }}</span
+            >
+            <span class="min-w-0 flex-1 truncate" :title="lightboxItem.name">{{
+              lightboxItem.name
+            }}</span>
             <button
               @click="lightboxItem = null"
               class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-white/10 transition-colors hover:bg-white/20"
@@ -2014,9 +2348,17 @@ onUnmounted(() => {
               class="max-h-[62vh] max-w-[90vw] rounded-2xl object-contain shadow-2xl"
             />
             <!-- 非图片：无内联预览，展示文件图标 + 下载 -->
-            <div v-else class="flex flex-col items-center gap-4 rounded-2xl bg-gray-800/80 px-12 py-12 shadow-2xl">
+            <div
+              v-else
+              class="flex flex-col items-center gap-4 rounded-2xl bg-gray-800/80 px-12 py-12 shadow-2xl"
+            >
               <FileText class="h-16 w-16 text-indigo-300" />
-              <p class="max-w-[320px] truncate text-sm font-semibold text-white" :title="lightboxItem.name">{{ lightboxItem.name }}</p>
+              <p
+                class="max-w-[320px] truncate text-sm font-semibold text-white"
+                :title="lightboxItem.name"
+              >
+                {{ lightboxItem.name }}
+              </p>
               <a
                 :href="lightboxItem.url"
                 download
@@ -2044,7 +2386,9 @@ onUnmounted(() => {
           </div>
           <!-- 元信息 -->
           <p class="mt-2 text-[11px] tabular-nums text-white/60">
-            <template v-if="lightboxItem.width">{{ lightboxItem.width }}×{{ lightboxItem.height }} · </template>{{ formatSize(lightboxItem.size) }} · {{ formatDate(lightboxItem.createdAt) }}
+            <template v-if="lightboxItem.width"
+              >{{ lightboxItem.width }}×{{ lightboxItem.height }} · </template
+            >{{ formatSize(lightboxItem.size) }} · {{ formatDate(lightboxItem.createdAt) }}
           </p>
           <!-- 操作条 -->
           <div class="mt-3 flex max-w-full flex-wrap items-center justify-center gap-2">
@@ -2063,7 +2407,8 @@ onUnmounted(() => {
               rel="noopener noreferrer"
               class="flex h-8 shrink-0 items-center gap-1 rounded-lg bg-white/10 px-2.5 text-xs font-semibold text-white transition-colors hover:bg-white/20"
             >
-              {{ isImageType(lightboxItem.type, lightboxItem.name) ? '原图' : '下载' }} <ExternalLink class="h-3 w-3" />
+              {{ isImageType(lightboxItem.type, lightboxItem.name) ? '原图' : '下载' }}
+              <ExternalLink class="h-3 w-3" />
             </a>
             <button
               v-if="trashMode"
@@ -2084,17 +2429,20 @@ onUnmounted(() => {
         </div>
       </div>
     </Transition>
-
   </Teleport>
 
   <!-- 删除确认弹窗（回收站彻底删除专用；正常列表软删除免确认、toast 可撤销） -->
   <ConfirmDialog
     :open="showDeleteDialog"
-    :title="pendingBatchDelete ? `彻底删除这 ${selectedList.length} 条记录？` : '彻底删除这条记录？'"
+    :title="
+      pendingBatchDelete ? `彻底删除这 ${selectedList.length} 条记录？` : '彻底删除这条记录？'
+    "
     description="将从 KV 中彻底移除记录，并同步删除 CNB 上的原图文件，此操作不可恢复。"
     confirm-text="彻底删除"
     :loading="deleting"
-    @confirm="pendingBatchDelete ? handleBatchDelete() : pendingDelete && handleDelete(pendingDelete)"
+    @confirm="
+      pendingBatchDelete ? handleBatchDelete() : pendingDelete && handleDelete(pendingDelete)
+    "
     @cancel="closeDeleteDialog"
   >
     <div
@@ -2106,7 +2454,9 @@ onUnmounted(() => {
         :key="item.id"
         class="truncate font-mono text-xs leading-relaxed text-gray-600 dark:text-gray-300"
         :title="item.name"
-      >{{ item.name }}</p>
+      >
+        {{ item.name }}
+      </p>
       <p v-if="selectedList.length > 3" class="mt-1 text-xs text-gray-400 dark:text-gray-500">
         …等共 {{ selectedList.length }} 条
       </p>
@@ -2115,7 +2465,9 @@ onUnmounted(() => {
       v-else
       class="w-full break-all rounded-xl bg-gray-100/80 px-3.5 py-2.5 text-left font-mono text-xs leading-relaxed text-gray-600 line-clamp-2 dark:bg-gray-800/60 dark:text-gray-300"
       :title="pendingDelete?.name"
-    >{{ pendingDelete?.name }}</p>
+    >
+      {{ pendingDelete?.name }}
+    </p>
   </ConfirmDialog>
 
   <!-- 移动端筛选抽屉（<640px）：排序 / 类型 / 大小 / 时间收纳为底部弹层 -->
@@ -2129,7 +2481,10 @@ onUnmounted(() => {
       leave-to-class="opacity-0"
     >
       <div v-if="showFilterSheet" class="fixed inset-0 z-50 sm:hidden">
-        <div class="absolute inset-0 bg-gray-900/40 backdrop-blur-sm" @click="showFilterSheet = false"></div>
+        <div
+          class="absolute inset-0 bg-gray-900/40 backdrop-blur-sm"
+          @click="showFilterSheet = false"
+        ></div>
         <div
           class="absolute inset-x-0 bottom-0 rounded-t-2xl border-t border-gray-100 bg-white p-5 shadow-2xl dark:border-gray-800 dark:bg-gray-900"
           style="padding-bottom: calc(1.25rem + env(safe-area-inset-bottom))"
@@ -2144,7 +2499,11 @@ onUnmounted(() => {
                   :key="opt.key"
                   @click="setSort(opt.key)"
                   class="rounded-xl px-3 py-1.5 text-xs font-bold transition-all"
-                  :class="sortKey === opt.key ? 'brand-gradient text-white shadow-md shadow-indigo-500/25' : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'"
+                  :class="
+                    sortKey === opt.key
+                      ? 'brand-gradient text-white shadow-md shadow-indigo-500/25'
+                      : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'
+                  "
                 >
                   {{ opt.label }}{{ sortKey === opt.key ? (sortDir === 'asc' ? ' ↑' : ' ↓') : '' }}
                 </button>
@@ -2156,7 +2515,11 @@ onUnmounted(() => {
                 <button
                   @click="typeFilter = 'all'"
                   class="rounded-xl px-3 py-1.5 text-xs font-bold transition-all"
-                  :class="typeFilter === 'all' ? 'brand-gradient text-white shadow-md shadow-indigo-500/25' : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'"
+                  :class="
+                    typeFilter === 'all'
+                      ? 'brand-gradient text-white shadow-md shadow-indigo-500/25'
+                      : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'
+                  "
                 >
                   全部
                 </button>
@@ -2165,7 +2528,11 @@ onUnmounted(() => {
                   :key="t"
                   @click="typeFilter = t"
                   class="rounded-xl px-3 py-1.5 text-xs font-bold uppercase transition-all"
-                  :class="typeFilter === t ? 'brand-gradient text-white shadow-md shadow-indigo-500/25' : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'"
+                  :class="
+                    typeFilter === t
+                      ? 'brand-gradient text-white shadow-md shadow-indigo-500/25'
+                      : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'
+                  "
                 >
                   {{ t }}
                 </button>
@@ -2179,7 +2546,11 @@ onUnmounted(() => {
                   :key="opt.value"
                   @click="sizeFilter = opt.value"
                   class="rounded-xl px-3 py-1.5 text-xs font-bold transition-all"
-                  :class="sizeFilter === opt.value ? 'brand-gradient text-white shadow-md shadow-indigo-500/25' : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'"
+                  :class="
+                    sizeFilter === opt.value
+                      ? 'brand-gradient text-white shadow-md shadow-indigo-500/25'
+                      : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'
+                  "
                 >
                   {{ opt.label }}
                 </button>
@@ -2193,7 +2564,11 @@ onUnmounted(() => {
                   :key="opt.value"
                   @click="timeFilter = opt.value"
                   class="rounded-xl px-3 py-1.5 text-xs font-bold transition-all"
-                  :class="timeFilter === opt.value ? 'brand-gradient text-white shadow-md shadow-indigo-500/25' : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'"
+                  :class="
+                    timeFilter === opt.value
+                      ? 'brand-gradient text-white shadow-md shadow-indigo-500/25'
+                      : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-300'
+                  "
                 >
                   {{ opt.label }}
                 </button>

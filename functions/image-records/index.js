@@ -94,6 +94,12 @@ async function updateIndex(normalized) {
   await writeIndex(index)
 }
 
+// 读路径惰性清理节流：源文件删除（CNB/S3 外部接口调用）最多每 5 分钟触发一次，
+// 避免每次列表请求都同步打外部接口把响应拖慢；记录体的过期清理仍随每次快照即时执行。
+// 模块级变量：同一 isolate 内跨请求生效（isolate 重建即重置，语义不变）
+const PURGE_CLEANUP_INTERVAL_MS = 5 * 60 * 1000
+let lastPurgeCleanupAt = 0
+
 export async function onRequest({ request, env }) {
   try {
     const url = new URL(request.url)
@@ -141,7 +147,11 @@ export async function onRequest({ request, env }) {
     // + 惰性清理（顺带有界清理过期记录的 CNB 原图，失败留待孤儿扫描兜底）
     async function records(force = false, verify = false) {
       const all = await snapshot(force, verify)
-      return purgeExpired(all, env, true)
+      // 节流：源文件清理（外部接口调用）最多每 5 分钟一次；未到窗口则只做无网络成本的记录体清理
+      const now = Date.now()
+      const allowCleanup = now - lastPurgeCleanupAt >= PURGE_CLEANUP_INTERVAL_MS
+      if (allowCleanup) lastPurgeCleanupAt = now
+      return purgeExpired(all, allowCleanup ? env : null, allowCleanup)
     }
 
     // CNB 孤儿文件扫描：?cnb-assets=1（边缘函数按文件路由，子路径不会进入本文件，

@@ -15,6 +15,11 @@ import {
   MAX_UPLOAD_MB,
   UPLOAD_RATE_LIMIT,
   ALLOWED_MIMES,
+  PROXY_EXT_RE,
+  isImageName,
+  isAllowedFileName,
+  CNB_MAX_MB,
+  CNB_MAX_BYTES,
 } from './_utils'
 import { s3PutObject, s3ProbeBucket } from './_s3'
 import {
@@ -40,11 +45,12 @@ const upload = multer({
     files: 2, // 最多 2 个文件（主图 + 缩略图）
   },
   fileFilter: (req, file, cb) => {
-    // 只允许图片类型
-    if (ALLOWED_MIMES.includes(file.mimetype)) {
+    // 图片（按 MIME 快筛）或常见文档/压缩包（按扩展名）
+    const name = fixMulterFilename(file.originalname || '')
+    if (ALLOWED_MIMES.includes(file.mimetype) || isAllowedFileName(name)) {
       cb(null, true)
     } else {
-      cb(new Error('只允许上传图片文件'))
+      cb(new Error('不支持的文件类型'))
     }
   },
 })
@@ -84,8 +90,14 @@ app.use(securityHeaders)
 // S3 key 由服务端加唯一前缀：客户端文件名仅清洗不去重，裸用会同名互相覆盖且叠加 immutable 缓存
 async function uploadOneImage(buffer: Buffer, fileName: string, contentType: string, requestedStorage?: string) {
   const backend = await getActiveBackend(requestedStorage)
+  const image = isImageName(fileName)
   if (backend.kind === 'cnb') {
-    const result = await uploadToCnb({ fileBuffer: buffer, fileName })
+    // CNB 单文件上限 15MB（前端已有同口径前置校验，这里服务端强制兜底）
+    if (buffer.length > CNB_MAX_BYTES) {
+      throw new Error(`CNB 仓库单文件最大 ${CNB_MAX_MB}MB`)
+    }
+    // 图片走 imgs 通道，文档/压缩包走 files 通道；直链同形，代理按扩展名自动分流
+    const result = await uploadToCnb({ fileBuffer: buffer, fileName, type: image ? 'imgs' : 'files' })
     return { url: buildPublicUrl(result.url), assets: result.assets }
   }
   const quotaError = await checkQuotaForUpload(backend.cfg, buffer.length)
@@ -125,8 +137,8 @@ app.use((req, res, next) => {
       if (!urlPath || urlPath.includes('..') || urlPath.includes('\\') || urlPath.startsWith('/')) {
         return res.status(400).json({ error: 'Invalid image path' })
       }
-      // 扩展名白名单与上传侧一致（SVG 可内嵌脚本，不放行）
-      if (!/\.(jpg|jpeg|png|gif|webp)$/i.test(urlPath)) {
+      // 扩展名白名单与上传侧一致（图片 + 常见文档/压缩包；SVG 可内嵌脚本，不放行）
+      if (!PROXY_EXT_RE.test(urlPath)) {
         return res.status(403).json({ error: 'Forbidden file type' })
       }
       const parsed = parseStoragePath(urlPath)
@@ -202,24 +214,29 @@ app.post(
       }
 
       const mainFile = files.file?.[0]
-      const thumbnailFile = files.thumbnail?.[0]
+      let thumbnailFile: Express.Multer.File | undefined = files.thumbnail?.[0]
 
-      // 验证文件类型
-      if (!ALLOWED_MIMES.includes(mainFile.mimetype)) {
+      // 文件名先清洗，再按扩展名分流校验
+      mainFile.originalname = sanitizeFilename(fixMulterFilename(mainFile.originalname))
+      const mainIsImage = isImageName(mainFile.originalname)
+      if (mainIsImage) {
+        // 图片：MIME 白名单 + 文件头（magic bytes）双校验（Content-Type 可伪造）
+        if (!ALLOWED_MIMES.includes(mainFile.mimetype) || !detectImageMime(mainFile.buffer)) {
+          return res.status(400).json(reply(1, '文件内容不是有效的图片', ''))
+        }
+      } else if (!isAllowedFileName(mainFile.originalname)) {
         return res.status(400).json(reply(1, '不支持的文件类型', ''))
       }
 
-      // 验证文件头（magic bytes）：Content-Type 可伪造，必须校验真实内容
-      if (!detectImageMime(mainFile.buffer)) {
-        return res.status(400).json(reply(1, '文件内容不是有效的图片', ''))
-      }
-      if (thumbnailFile && !detectImageMime(thumbnailFile.buffer)) {
-        return res.status(400).json(reply(1, '缩略图内容不是有效的图片', ''))
-      }
-
-      mainFile.originalname = sanitizeFilename(fixMulterFilename(mainFile.originalname))
+      // 缩略图仅图片有：文档/压缩包忽略前端可能带入的缩略图
       if (thumbnailFile) {
-        thumbnailFile.originalname = sanitizeFilename(fixMulterFilename(thumbnailFile.originalname))
+        if (!mainIsImage) {
+          thumbnailFile = undefined
+        } else if (!detectImageMime(thumbnailFile!.buffer)) {
+          return res.status(400).json(reply(1, '缩略图内容不是有效的图片', ''))
+        } else {
+          thumbnailFile.originalname = sanitizeFilename(fixMulterFilename(thumbnailFile.originalname))
+        }
       }
 
       // 上传目标：multipart 的 storage 文本字段（顶栏下拉本机选择）；缺省走全局默认
@@ -493,8 +510,8 @@ app.use((err: any, _req: any, res: any, _next: (_e: unknown) => void) => {
     }
     return res.status(400).json(reply(1, '文件上传失败', null))
   }
-  if (err?.message === '只允许上传图片文件') {
-    return res.status(400).json(reply(1, '只允许上传图片文件', null))
+  if (err?.message === '不支持的文件类型') {
+    return res.status(400).json(reply(1, '不支持的文件类型（仅支持图片与常见文档/压缩包）', null))
   }
   res.status(500).json(reply(1, '上传失败，请稍后重试', null))
 })

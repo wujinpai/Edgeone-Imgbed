@@ -1,5 +1,5 @@
 import crypto from 'node:crypto'
-import { deleteFromCnb, getInternalAuthSecret } from './_utils'
+import { deleteFromCnb, getInternalAuthSecret, IMAGE_EXT_RE, PROXY_EXT_RE, contentDispositionAttachment } from './_utils'
 import { s3DeleteObjects, s3GetObject, type S3Config } from './_s3'
 
 // ===== 多存储注册表：桶配置（KV，经边缘函数内部端点读取）+ 路由标记解析 + S3 代理/删除 =====
@@ -196,33 +196,37 @@ export function toS3Config(b: StorageBucket): S3Config {
 
 // ---------------------------------------------------------------- S3 图片代理（流式）
 
-const ALLOWED_PROXY_EXTENSIONS = /\.(jpg|jpeg|png|gif|webp)$/i
-
-const S3_PROXY_MAX_BYTES = 20 * 1024 * 1024
+const S3_PROXY_MAX_BYTES = 30 * 1024 * 1024
 
 /** S3 对象流式代理：SigV4 GET 后原样转发（校验与缓存策略与 CNB 代理一致） */
 export async function proxyS3Request(cfg: StorageBucket, key: string, res: any): Promise<void> {
-  if (!key || key.includes('..') || key.includes('\\') || !ALLOWED_PROXY_EXTENSIONS.test(key)) {
+  if (!key || key.includes('..') || key.includes('\\') || !PROXY_EXT_RE.test(key)) {
     return res.status(403).json({ error: 'Forbidden image path' })
   }
+  // 图片按上游 image/* 原样输出；其他文件（文档/压缩包）强制下载，规避同源内联执行风险
+  const isImg = IMAGE_EXT_RE.test(key)
   try {
     const resp = await s3GetObject(toS3Config(cfg), key)
-    const contentType = resp.headers.get('content-type') || 'application/octet-stream'
-    if (!contentType.startsWith('image/')) {
+    const upstreamType = resp.headers.get('content-type') || 'application/octet-stream'
+    if (isImg && !upstreamType.startsWith('image/')) {
       await resp.arrayBuffer().catch(() => {})
       return res.status(502).json({ error: 'Upstream returned non-image content' })
     }
+    const contentType = isImg ? upstreamType : 'application/octet-stream'
     const contentLength = resp.headers.get('content-length')
     // 与 CNB 代理同款尺寸上限：桶内非图床大对象（仅扩展名巧合）不拖垮实例带宽
     if (contentLength && Number(contentLength) > S3_PROXY_MAX_BYTES) {
       await resp.arrayBuffer().catch(() => {})
-      return res.status(413).json({ error: 'Image too large to proxy' })
+      return res.status(413).json({ error: 'File too large to proxy' })
     }
     const s3Etag =
       resp.headers.get('etag') ||
       `"${crypto.createHash('md5').update(key + (contentLength || '')).digest('hex').slice(0, 16)}"`
 
     res.setHeader('Content-Type', contentType)
+    if (!isImg) {
+      res.setHeader('Content-Disposition', contentDispositionAttachment(key))
+    }
     res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
     res.setHeader('ETag', s3Etag)
     res.setHeader('Access-Control-Allow-Origin', '*')

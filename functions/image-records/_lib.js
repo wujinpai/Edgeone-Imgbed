@@ -492,20 +492,22 @@ function cnbImgPathOf(recordUrl) {
   return null
 }
 
-// 平台资产的 path → imgPath（可能带 -/imgs/ 前缀，也可能已是裸路径）
+// 平台资产的 path → imgPath（可能带 -/imgs/、-/files/ 前缀，也可能已是裸路径）
 function normalizeAssetPath(assetPath) {
   const raw = String(assetPath || '')
-  const idx = raw.indexOf('-/imgs/')
-  if (idx >= 0) {
-    const p = raw.slice(idx + '-/imgs/'.length).split(/[?#]/)[0]
-    return p || null
+  for (const marker of ['-/imgs/', '-/files/']) {
+    const idx = raw.indexOf(marker)
+    if (idx >= 0) {
+      const p = raw.slice(idx + marker.length).split(/[?#]/)[0]
+      return p || null
+    }
   }
   const p = raw.split(/[?#]/)[0]
   return p || null
 }
 
 // 分页拉取仓库全部平台资产：{ ok, assets?, others?, truncated?, reason? }
-// 仅收集 slug_img（我们经 upload/imgs 上传的类型），其他类型计数后跳过
+// 收集 slug_img（图片）与 slug_file（文档/压缩包），其他类型计数后跳过
 async function listCnbImgAssets(env) {
   const slug = env?.SLUG_IMG
   const token = env?.TOKEN_IMG
@@ -525,7 +527,7 @@ async function listCnbImgAssets(env) {
       const list = (await resp.json()) || []
       if (!Array.isArray(list)) return { ok: false, reason: 'upstream' }
       for (const item of list) {
-        if (item?.record_type === 'slug_img') {
+        if (item?.record_type === 'slug_img' || item?.record_type === 'slug_file') {
           const path = normalizeAssetPath(item.path)
           if (path) {
             assets.push({ path, size: Number(item.size_in_byte) || 0, createdAt: String(item.created_at || '') })
@@ -556,6 +558,17 @@ function isValidImgPath(p) {
   return /^[\p{L}\p{N}._\-/]+$/u.test(p)
 }
 
+// 图片扩展名：图片走 /-/imgs/，其余（文档/压缩包）走 /-/files/
+const IMAGE_EXT_RE = /\.(jpg|jpeg|png|gif|webp)$/i
+
+// imgPath → 删除目标（通道 + 相对路径）；自带 files/ 前缀同样判为文件
+function cnbDeleteTarget(imgPath) {
+  const hasFilesPrefix = imgPath.startsWith('files/')
+  const rel = hasFilesPrefix ? imgPath.slice('files/'.length) : imgPath
+  const channel = hasFilesPrefix || !IMAGE_EXT_RE.test(rel) ? 'files' : 'imgs'
+  return { channel, rel }
+}
+
 // 分块并发删除 CNB 源文件；自身不抛出，返回逐路径结果
 // { ok: string[], failed: string[], skipped: number }（404 视为成功）。
 // 缺少 env 配置时所有有效路径计入 failed（如实上报"未删除"，不谎报成功）。
@@ -574,11 +587,12 @@ async function deleteCnbImgFiles(env, paths) {
   for (let i = 0; i < unique.length; i += CNB_DELETE_CHUNK) {
     const results = await Promise.all(
       unique.slice(i, i + CNB_DELETE_CHUNK).map(async (imgPath) => {
-        const encoded = imgPath.split('/').map(encodeURIComponent).join('/')
+        const { channel, rel } = cnbDeleteTarget(imgPath)
+        const encoded = rel.split('/').map(encodeURIComponent).join('/')
         let timer
         try {
           const resp = await Promise.race([
-            fetch(`https://api.cnb.cool/${slug}/-/imgs/${encoded}`, {
+            fetch(`https://api.cnb.cool/${slug}/-/${channel}/${encoded}`, {
               method: 'DELETE',
               headers: { Authorization: `Bearer ${token}` },
             }),

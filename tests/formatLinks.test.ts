@@ -43,4 +43,39 @@ describe('buildFormats', () => {
     const fmt = buildFormats({ url: 'https://x.com/a.webp' }).find((f) => f.key === 'markdown')
     expect(fmt?.value).toContain('![img]')
   })
+
+  // 非图片（文档/压缩包）：生成文字链接，而不是会渲染成裂图的 <img>/![]
+  const doc = { url: 'https://x.com/api/img/report.pdf', name: 'report.pdf', type: 'application/pdf' }
+
+  it('非图片 html 生成文字链接而非 img', () => {
+    const fmt = buildFormats(doc).find((f) => f.key === 'html')
+    expect(fmt?.value).toBe('<a href="https://x.com/api/img/report.pdf" target="_blank" rel="noopener">report.pdf</a>')
+  })
+
+  it('非图片 markdown 生成文字链接而非图片语法', () => {
+    const fmt = buildFormats(doc).find((f) => f.key === 'markdown')
+    expect(fmt?.value).toBe('[report.pdf](https://x.com/api/img/report.pdf)')
+  })
+
+  it('非图片 bbcode 使用 [url] 标签', () => {
+    const fmt = buildFormats(doc).find((f) => f.key === 'bbcode')
+    expect(fmt?.value).toBe('[url=https://x.com/api/img/report.pdf]report.pdf[/url]')
+  })
+
+  it('无 type 时按 name 扩展名判定非图片', () => {
+    const fmt = buildFormats({ url: 'https://x.com/f.zip', name: 'f.zip' }).find((f) => f.key === 'html')
+    expect(fmt?.value).toContain('<a href=')
+  })
+
+  it('无 type/name 时按 URL 扩展名兜底为非图片', () => {
+    const fmt = buildFormats({ url: 'https://x.com/a.zip' }).find((f) => f.key === 'markdown')
+    expect(fmt?.value).toBe('[文件](https://x.com/a.zip)')
+  })
+
+  it('非图片 markdown 转义链接文字中的方括号', () => {
+    const fmt = buildFormats({ url: 'https://x.com/a.txt', name: 'a[b].txt', type: 'text/plain' }).find(
+      (f) => f.key === 'markdown',
+    )
+    expect(fmt?.value).toBe('[a\\[b\\].txt](https://x.com/a.txt)')
+  })
 })

@@ -292,8 +292,6 @@ async function fetchCnbStorageUsage(
 /**
  * 图片代理处理函数（模块级单例：无请求级闭包，每次调用复用同一函数）
  */
-const ALLOWED_PROXY_EXTENSIONS = /\.(jpg|jpeg|png|gif|webp)$/i
-
 async function proxyImageRequest(
   baseUrl: string,
   requestConfig: { headers?: Record<string, string>; timeout?: number },
@@ -324,14 +322,18 @@ async function proxyImageRequest(
         return res.status(400).json({ error: 'Invalid image path' })
       }
 
-      // 额外验证：只允许与上传白名单一致的图片扩展名
-      // （SVG 可内嵌脚本存在 XSS 风险，bmp/ico 上传侧本就不允许，均不放行）
-      if (!ALLOWED_PROXY_EXTENSIONS.test(urlPath)) {
+      // 放行扩展名 = 图片 + 常见文档/压缩包（与上传侧一致；SVG 可内嵌脚本，不放行）
+      if (!PROXY_EXT_RE.test(urlPath)) {
         console.error('❌ [Proxy] Forbidden file type:', urlPath)
         return res.status(403).json({ error: 'Forbidden file type' })
       }
+      // 图片走 CNB imgs 通道，其他文件走 files 通道（按扩展名判定；若路径自带 files/ 前缀先剥离）
+      const isImg = IMAGE_EXT_RE.test(urlPath)
+      let relPath = urlPath
+      if (!isImg && relPath.startsWith('files/')) relPath = relPath.slice('files/'.length)
+      const targetBase = isImg ? baseUrl : baseUrl.replace('/-/imgs/', '/-/files/')
 
-      const target = new URL(urlPath, baseUrl)
+      const target = new URL(relPath, targetBase)
       // SSRF 防护：路径若是绝对 URL 会覆盖 base，导致本接口沦为任意主机的开放代理。
       // 目标必须与 BASE_URL 同源，否则拒绝
       if (target.origin !== new URL(baseUrl).origin) {
@@ -353,19 +355,21 @@ async function proxyImageRequest(
       const response = await fetch(targetUrl, fetchOptions)
 
       if (response.ok) {
-        const contentType = response.headers.get('content-type') || 'image/png'
-        // 上游返回非图片内容时拒绝，防止将 HTML/脚本作为图片代理输出
-        if (!contentType.startsWith('image/')) {
+        const upstreamType = response.headers.get('content-type') || 'image/png'
+        // 图片：上游必须返回 image/*（防止把 HTML/脚本当图片代理输出）；
+        // 非图片：统一按附件强制下载，不使用上游 Content-Type，规避同源内联执行风险
+        if (isImg && !upstreamType.startsWith('image/')) {
           // 上游 body 必须消费掉，否则底层连接无法复用（keep-alive 泄漏）
           await response.arrayBuffer().catch(() => {})
-          console.error(`❌ [Proxy] Unexpected content-type: ${contentType}`)
+          console.error(`❌ [Proxy] Unexpected content-type: ${upstreamType}`)
           return res.status(502).json({ error: 'Upstream returned non-image content' })
         }
+        const contentType = isImg ? upstreamType : 'application/octet-stream'
         const contentLength = response.headers.get('content-length')
-        // 代理上限 20MB：超限直接 413，避免 arrayBuffer 全量进内存拖垮实例
-        if (contentLength && Number(contentLength) > 20 * 1024 * 1024) {
+        // 代理上限 30MB：超限直接 413，避免 arrayBuffer 全量进内存拖垮实例
+        if (contentLength && Number(contentLength) > 30 * 1024 * 1024) {
           await response.arrayBuffer().catch(() => {})
-          return res.status(413).json({ error: 'Image too large to proxy' })
+          return res.status(413).json({ error: 'File too large to proxy' })
         }
 
         const upstreamEtag =
@@ -373,6 +377,10 @@ async function proxyImageRequest(
           `"${crypto.createHash('md5').update(urlPath + (contentLength || '')).digest('hex').slice(0, 16)}"`
 
         res.setHeader('Content-Type', contentType)
+        // 非图片：强制下载（Content-Disposition: attachment），避免同源内联执行 HTML/SVG/脚本
+        if (!isImg) {
+          res.setHeader('Content-Disposition', contentDispositionAttachment(relPath))
+        }
         res.setHeader('Cache-Control', 'public, max-age=31536000, immutable')
         res.setHeader('ETag', upstreamEtag)
         res.setHeader('Access-Control-Allow-Origin', '*')
@@ -487,16 +495,50 @@ function sanitizeFilename(filename: string): string {
 }
 
 /**
- * 拼接对外图片直链：BASE_IMG_URL 去尾斜杠 + /api/img/ + CNB 路径
+ * 拼接对外直链：BASE_IMG_URL 去尾斜杠 + /api/img/ + 相对路径。
+ * 图片与文件同形（代理按扩展名自动分流 CNB imgs/files 通道），故这里不做额外前缀
  */
-function buildPublicUrl(cnbPath: string): string {
+function buildPublicUrl(relPath: string): string {
   let baseUrl = process.env.BASE_IMG_URL || ''
   if (baseUrl.endsWith('/')) baseUrl = baseUrl.slice(0, -1)
-  return `${baseUrl}/api/img/${extractImagePath(cnbPath)}`
+  return `${baseUrl}/api/img/${relPath}`
 }
 
-/** 上传侧允许的 MIME 类型（与前端 allowedTypes 一致） */
+/** 上传侧允许的图片 MIME 类型（PicGo 图片集成与 multer 快筛用） */
 const ALLOWED_MIMES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+
+/** 图片扩展名：内置压缩/缩略图/内联预览管线仅对图片生效 */
+const IMAGE_EXT_RE = /\.(jpg|jpeg|png|gif|webp)$/i
+/** 其他可上传格式（常见文档 + 压缩包）：走 CNB files 通道、代理强制下载 */
+const FILE_EXT_RE = /\.(pdf|doc|docx|xls|xlsx|ppt|pptx|txt|csv|md|json|xml|zip|rar|7z|tar|gz)$/i
+/** 代理（/api/img）放行扩展名 = 图片 + 文档/压缩包 */
+const PROXY_EXT_RE = /\.(jpg|jpeg|png|gif|webp|pdf|doc|docx|xls|xlsx|ppt|pptx|txt|csv|md|json|xml|zip|rar|7z|tar|gz)$/i
+
+/** 按文件名扩展名判定是否图片（上传分流/代理内容处理的一致依据） */
+function isImageName(name: string): boolean {
+  return IMAGE_EXT_RE.test(String(name || ''))
+}
+
+/** 是否属于放行的文档/压缩包格式 */
+function isAllowedFileName(name: string): boolean {
+  return FILE_EXT_RE.test(String(name || ''))
+}
+
+/**
+ * CNB 对象存储单文件上限（MB）：官方 OpenAPI 未文档化限制，按需求取 15MB。
+ * 上传主图/文件走 CNB 时由服务端强制校验（前端亦有同名前置校验）。
+ */
+const CNB_MAX_MB = (() => {
+  const n = Number(process.env.CNB_MAX_UPLOAD_MB)
+  return Number.isFinite(n) && n > 0 ? Math.min(100, Math.round(n)) : 15
+})()
+const CNB_MAX_BYTES = CNB_MAX_MB * 1024 * 1024
+
+/** 非图片代理响应头：强制下载，规避同源内联执行（HTML/SVG/脚本等）风险 */
+function contentDispositionAttachment(filePath: string): string {
+  const name = (filePath.split('/').pop() || 'file').replace(/["\\\r\n]/g, '_')
+  return `attachment; filename="${name}"; filename*=UTF-8''${encodeURIComponent(name)}`
+}
 
 // ===== CNB 源文件删除（与彻底删除联动）=====
 // 官方接口 DELETE /{repo}/-/imgs/{imgPath}（删除 UploadImgs 上传的图片），
@@ -547,9 +589,13 @@ async function deleteFromCnb(urls: string[], paths: string[] = []): Promise<{ ok
 
   await Promise.all(
     targets.map(async (imgPath) => {
-      const encoded = imgPath.split('/').map(encodeURIComponent).join('/')
+      // 图片走 /-/imgs/，文档/压缩包走 /-/files/（按扩展名判定；路径自带 files/ 前缀同样判为文件）
+      const hasFilesPrefix = imgPath.startsWith('files/')
+      const rel = hasFilesPrefix ? imgPath.slice('files/'.length) : imgPath
+      const channel = hasFilesPrefix || !IMAGE_EXT_RE.test(rel) ? 'files' : 'imgs'
+      const encoded = rel.split('/').map(encodeURIComponent).join('/')
       try {
-        const resp = await fetch(`https://api.cnb.cool/${slug}/-/imgs/${encoded}`, {
+        const resp = await fetch(`https://api.cnb.cool/${slug}/-/${channel}/${encoded}`, {
           method: 'DELETE',
           headers: { Authorization: `Bearer ${token}` },
           signal: AbortSignal.timeout(CNB_TIMEOUT_MS),
@@ -564,4 +610,4 @@ async function deleteFromCnb(urls: string[], paths: string[] = []): Promise<{ ok
   return { ok, failed, skipped }
 }
 
-export { proxyImageRequest as createProxyHandler, uploadToCnb, signAuthToken, verifyAuthToken, detectImageMime, securePasswordCompare, extractImagePath, fixMulterFilename, sanitizeFilename, buildPublicUrl, fetchCnbStorageUsage, deleteFromCnb, isValidImgPath, extractCnbImgPath, MAX_UPLOAD_MB, UPLOAD_RATE_LIMIT, ALLOWED_MIMES }
+export { proxyImageRequest as createProxyHandler, uploadToCnb, signAuthToken, verifyAuthToken, detectImageMime, securePasswordCompare, extractImagePath, fixMulterFilename, sanitizeFilename, buildPublicUrl, fetchCnbStorageUsage, deleteFromCnb, isValidImgPath, extractCnbImgPath, MAX_UPLOAD_MB, UPLOAD_RATE_LIMIT, ALLOWED_MIMES, IMAGE_EXT_RE, FILE_EXT_RE, PROXY_EXT_RE, isImageName, isAllowedFileName, CNB_MAX_MB, CNB_MAX_BYTES, contentDispositionAttachment }

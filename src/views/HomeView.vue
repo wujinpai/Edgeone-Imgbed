@@ -26,6 +26,7 @@ import {
   ArrowRight,
   Copy,
   FileCode2,
+  FileText,
   ZoomIn,
   Check,
 } from 'lucide-vue-next'
@@ -34,7 +35,7 @@ import { useRouter } from 'vue-router'
 import axios from '@/utils/axios'
 import { buildFormats, type UploadResult, type LinkFormatKey } from '@/utils/formatLinks'
 import { copyTextFallback } from '@/utils/clipboard'
-import { formatCompactSize, formatCompactCount, formatRecentTime } from '@/utils/format'
+import { formatCompactSize, formatCompactCount, formatRecentTime, isImageType } from '@/utils/format'
 import { useBucket } from '@/composables/useBucket'
 import { useGlobalStats } from '@/composables/useGlobalStats'
 import { useStorageUsage } from '@/composables/useStorageUsage'
@@ -280,6 +281,11 @@ const filteredRecent = computed(() => {
 const selectedLightboxImage = ref<LightboxImage | null>(null)
 const showLightbox = ref(false)
 const openLightbox = (item: RecentItem) => {
+  // 非图片（文档/压缩包）：无内联预览，直接新窗口打开下载
+  if (!isImageType(item.type, item.name)) {
+    window.open(item.url, '_blank', 'noopener')
+    return
+  }
   selectedLightboxImage.value = {
     id: item.id,
     name: item.name,
@@ -529,7 +535,7 @@ const goBatch = () => router.push('/admin')
             class="card group overflow-hidden"
           >
             <div class="relative aspect-[4/3] overflow-hidden bg-gray-100 dark:bg-gray-800">
-              <a :href="item.url" @click.prevent="openLightbox(item)" title="点击大图预览" class="block h-full w-full cursor-zoom-in">
+              <a v-if="isImageType(item.type, item.name)" :href="item.url" @click.prevent="openLightbox(item)" title="点击大图预览" class="block h-full w-full cursor-zoom-in">
                 <img
                   :src="item.thumbnailUrl || item.url"
                   :alt="item.name"
@@ -539,6 +545,10 @@ const goBatch = () => router.push('/admin')
                   @error="onThumbError"
                 />
               </a>
+              <!-- 非图片：文件图标（点击新窗口下载） -->
+              <button v-else @click="openLightbox(item)" title="点击下载文件" class="flex h-full w-full cursor-pointer items-center justify-center">
+                <FileText class="h-10 w-10 text-gray-300 dark:text-gray-600" />
+              </button>
             </div>
             <div class="p-3">
               <p class="truncate text-xs font-semibold text-gray-800 sm:text-sm dark:text-gray-100" :title="item.name">{{ item.name }}</p>
@@ -586,7 +596,7 @@ const goBatch = () => router.push('/admin')
             :key="item.id"
             class="flex items-center gap-3 px-3 py-2.5 sm:px-4"
           >
-            <a :href="item.url" @click.prevent="openLightbox(item)" class="h-11 w-11 shrink-0 cursor-zoom-in overflow-hidden rounded-lg bg-gray-100 dark:bg-gray-800" title="点击大图预览">
+            <a v-if="isImageType(item.type, item.name)" :href="item.url" @click.prevent="openLightbox(item)" class="h-11 w-11 shrink-0 cursor-zoom-in overflow-hidden rounded-lg bg-gray-100 dark:bg-gray-800" title="点击大图预览">
               <img
                 :src="item.thumbnailUrl || item.url"
                 :alt="item.name"
@@ -596,6 +606,9 @@ const goBatch = () => router.push('/admin')
                 @error="onThumbError"
               />
             </a>
+            <button v-else @click="openLightbox(item)" class="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-gray-100 dark:bg-gray-800" title="点击下载文件">
+              <FileText class="h-5 w-5 text-gray-400 dark:text-gray-500" />
+            </button>
             <div class="min-w-0 flex-1">
               <p class="truncate text-xs font-semibold text-gray-800 sm:text-sm dark:text-gray-100" :title="item.name">{{ item.name }}</p>
               <p class="mt-0.5 flex items-center gap-1.5 text-[11px] tabular-nums text-gray-400 dark:text-gray-500">

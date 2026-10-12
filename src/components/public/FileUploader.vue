@@ -13,7 +13,7 @@
       @dragleave.prevent="isDragging = false"
       @drop.prevent="onDrop"
     >
-      <input type="file" accept="image/*" multiple @change="onFileChange" class="hidden" />
+      <input type="file" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.md,.json,.xml,.zip,.rar,.7z,.tar,.gz" multiple @change="onFileChange" class="hidden" />
       <div v-if="tasks.length === 0 || batchCompleted" class="flex flex-col items-center gap-3 transition-transform duration-300 group-hover:-translate-y-1">
         <div
           class="flex h-14 w-14 items-center justify-center rounded-2xl bg-indigo-50 text-indigo-500 shadow-sm transition-all sm:h-16 sm:w-16 dark:bg-indigo-500/15 dark:text-indigo-300"
@@ -26,7 +26,7 @@
             {{ isDragging ? '快松手！' : '点击或拖拽上传' }}
           </p>
           <p class="mx-auto max-w-md text-xs leading-relaxed text-gray-400 sm:text-sm dark:text-gray-500">
-            支持 JPG、PNG、GIF、WebP（CNB 最大 5MB，其他存储桶按实际限制），可批量多选、Ctrl+V 粘贴或拖入整个文件夹
+            支持 JPG、PNG、GIF、WebP 图片，以及 PDF / Office 文档 / 压缩包（CNB 单文件最大 15MB，其他存储桶按实际限制），可批量多选、Ctrl+V 粘贴或拖入整个文件夹
           </p>
         </div>
       </div>
@@ -42,7 +42,7 @@
             <p class="max-w-[200px] truncate text-sm font-semibold text-gray-900 sm:max-w-[280px] dark:text-gray-100">{{ displayTask?.rawName }}</p>
             <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
               <template v-if="displayTask?.status === 'processing'">正在压缩 {{ processingIndex }}/{{ tasks.length }}</template>
-              <template v-else>共 {{ tasks.length }} 张，已就绪 {{ readyCount }}</template>
+              <template v-else>共 {{ tasks.length }} 个，已就绪 {{ readyCount }}</template>
             </p>
           </div>
           <button
@@ -68,7 +68,7 @@
       @dragleave.prevent="isDragging = false"
       @drop.prevent="onDrop"
     >
-      <input type="file" accept="image/*" multiple @change="onFileChange" class="hidden" />
+      <input type="file" accept="image/*,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.md,.json,.xml,.zip,.rar,.7z,.tar,.gz" multiple @change="onFileChange" class="hidden" />
 
       <div v-if="tasks.length === 0 || batchCompleted" class="flex flex-col items-center gap-4 transition-transform duration-300 group-hover:-translate-y-1">
         <div class="flex h-16 w-16 items-center justify-center rounded-2xl bg-indigo-50 text-indigo-600 shadow-sm transition-colors group-hover:bg-indigo-100 dark:bg-indigo-500/15 dark:text-indigo-300 dark:group-hover:bg-indigo-500/25">
@@ -79,7 +79,7 @@
             {{ isDragging ? '快松手！' : '点击或拖拽上传' }}
           </p>
           <p class="text-sm text-gray-400 dark:text-gray-500">
-            支持 JPG, PNG, GIF, WebP（CNB 最大 5MB，其他存储桶按实际限制），可批量多选、Ctrl+V 粘贴或拖入整个文件夹
+            支持 JPG, PNG, GIF, WebP 图片，以及 PDF / Office 文档 / 压缩包（CNB 单文件最大 15MB，其他存储桶按实际限制），可批量多选、Ctrl+V 粘贴或拖入整个文件夹
           </p>
         </div>
       </div>
@@ -118,7 +118,7 @@
             <span v-else class="rounded bg-indigo-50 px-1.5 py-0.5 text-indigo-600 dark:bg-indigo-500/15 dark:text-indigo-300">原图直传</span>
           </div>
           <div v-if="tasks.length > 1" class="mt-2 inline-flex rounded-full bg-indigo-50 px-2.5 py-0.5 text-[11px] font-bold text-indigo-600 dark:bg-indigo-500/15 dark:text-indigo-300">
-            共 {{ tasks.length }} 张，已就绪 {{ readyCount }}
+            共 {{ tasks.length }} 个，已就绪 {{ readyCount }}
           </div>
         </div>
       </div>
@@ -193,7 +193,7 @@
       :disabled="!canUpload || uploading"
       @click="startUpload"
     >
-      {{ uploading ? '正在飞速上传...' : tasks.length > 1 ? `上传图片（${tasks.length} 张）` : '上传图片' }}
+      {{ uploading ? '正在飞速上传...' : tasks.length > 1 ? `上传文件（${tasks.length} 个）` : '上传文件' }}
       <ArrowRight v-if="!uploading" class="h-5 w-5" />
     </button>
     <button
@@ -204,7 +204,7 @@
       :disabled="!canUpload || uploading"
       @click="startUpload"
     >
-      {{ uploading ? '正在飞速上传...' : tasks.length > 1 ? `开始上传（${tasks.length} 张）` : '开始上传图片' }}
+      {{ uploading ? '正在飞速上传...' : tasks.length > 1 ? `开始上传（${tasks.length} 个）` : '开始上传文件' }}
     </button>
 
     <p v-if="errorMsg" class="mt-4 text-center text-sm font-medium text-red-500 animate-shake">
@@ -230,7 +230,7 @@
       </Transition>
     </Teleport>
 
-    <!-- 集中提示弹窗：格式拒绝 / CNB 5MB 超限 -->
+    <!-- 集中提示弹窗：格式拒绝 / CNB 15MB 超限 -->
     <Teleport to="body">
       <div
         v-if="alertModal"
@@ -275,6 +275,35 @@ import { hashBlob, lookupHash, rememberHash } from '@/utils/dedupeCache'
 // MAX_UPLOAD_MB（默认 25MB）约束。批量批次大小与 KV 批量写接口上限一致
 const RAW_MAX_MB = 30
 const BATCH_FLUSH_SIZE = 50
+// 允许上传的图片 MIME（内置压缩/缩略图管线仅对图片生效）
+const IMAGE_MIMES = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
+// 除图片外开放的常见文档 / 压缩包（按扩展名判定，与服务端 FILE_EXT_RE 同口径）
+const DOC_EXT_RE = /\.(pdf|doc|docx|xls|xlsx|ppt|pptx|txt|csv|md|json|xml|zip|rar|7z|tar|gz)$/i
+// 文档/压缩包常见 MIME（浏览器对部分扩展名返回空 type，记录时按扩展名兜底，避免列表 badge 为空）
+const DOC_MIME_BY_EXT: Record<string, string> = {
+  pdf: 'application/pdf',
+  doc: 'application/msword',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xls: 'application/vnd.ms-excel',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  ppt: 'application/vnd.ms-powerpoint',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  txt: 'text/plain',
+  csv: 'text/csv',
+  md: 'text/markdown',
+  json: 'application/json',
+  xml: 'application/xml',
+  zip: 'application/zip',
+  rar: 'application/vnd.rar',
+  '7z': 'application/x-7z-compressed',
+  tar: 'application/x-tar',
+  gz: 'application/gzip',
+}
+function effectiveMime(name: string, mime: string): string {
+  if (mime) return mime
+  const ext = name.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase() || ''
+  return DOC_MIME_BY_EXT[ext] || 'application/octet-stream'
+}
 
 interface Props {
   /** hero：首页目标图风格大拖拽区 + 渐变大按钮；default：原紧凑形态 */
@@ -396,9 +425,10 @@ const { fetchUsage } = useStorageUsage()
 
 const tasks = ref<UploadTask[]>([])
 const rejectedFiles = ref<RejectedFile[]>([])
-// 集中提示弹窗（格式拒绝 / CNB 5MB 超限），替代零散 toast
+// 集中提示弹窗（格式拒绝 / CNB 超限），替代零散 toast
 const alertModal = ref<{ title: string; message: string } | null>(null)
-const CNB_MAX_BYTES = 5 * 1024 * 1024
+// CNB 仓库单文件上限 15MB（与服务端 CNB_MAX_MB 同口径）
+const CNB_MAX_BYTES = 15 * 1024 * 1024
 // 整批全部上传成功后置 true：顶部拖拽区恢复空状态，下方任务列表（完成状态）保留展示
 const batchCompleted = ref<boolean>(false)
 const processingIndex = ref(0)
@@ -570,6 +600,15 @@ async function onDrop(e: DragEvent): Promise<void> {
 
 // 单张压缩管线：批量主流程与失败重试共用，保证 GIF/原图直传判断一致
 async function processTaskFile(t: UploadTask): Promise<void> {
+  // 非图片（文档/压缩包）：跳过压缩与缩略图，仅按命名规则重命名后直传
+  if (!t.rawFile.type.startsWith('image/')) {
+    t.file = new File([t.rawFile], buildStoredName(t.rawName), { type: t.rawFile.type })
+    t.width = 0
+    t.height = 0
+    t.compressionRatio = 0
+    t.contentHash = await hashBlob(t.file)
+    return
+  }
   // GIF 始终跳过压缩以保留动画；开启"保持原图"时全部跳过
   const skipCompress =
     t.rawFile.type === 'image/gif' || settings.value.keepOriginal
@@ -619,8 +658,6 @@ async function handleFiles(list: File[]): Promise<void> {
     toast.warning('正在上传中，请等本轮结束后再添加文件')
     return
   }
-  const allowedTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp']
-
   // 被拒文件逐个记录原因，在队列下方持久展示（toast 只做汇总提醒）
   const rejected: RejectedFile[] = []
   const pushRejected = (name: string, reason: string) => {
@@ -630,8 +667,11 @@ async function handleFiles(list: File[]): Promise<void> {
   const seen = new Set<string>()
   const valid: File[] = []
   for (const f of list) {
-    if (!allowedTypes.includes(f.type)) {
-      pushRejected(f.name, '非图片格式')
+    // 图片按 MIME 判定；文档/压缩包按扩展名判定（浏览器对后者的 MIME 不可靠）
+    const isImage = IMAGE_MIMES.includes(f.type)
+    const isDoc = DOC_EXT_RE.test(f.name)
+    if (!isImage && !isDoc) {
+      pushRejected(f.name, '不支持的格式')
       continue
     }
     // 拦截超大文件：压缩前直接拒绝并明确告知上限
@@ -650,22 +690,22 @@ async function handleFiles(list: File[]): Promise<void> {
     valid.push(f)
   }
 
-  const typeSkipped = rejected.filter((r) => r.reason === '非图片格式').length
+  const typeSkipped = rejected.filter((r) => r.reason === '不支持的格式').length
   const oversizeSkipped = rejected.filter((r) => r.reason === `超过 ${RAW_MAX_MB}MB`).length
   const dupNames = rejected.filter((r) => r.reason === '重复/同名').map((r) => r.name)
   if (typeSkipped > 0) {
     // 格式拒绝弹窗：明确支持格式清单（拒绝明细仍在队列下方列表展示）
     const names = rejected
-      .filter((r) => r.reason === '非图片格式')
+      .filter((r) => r.reason === '不支持的格式')
       .slice(0, 3)
       .map((r) => r.name)
     alertModal.value = {
       title: '不支持的文件格式',
-      message: `仅允许上传 JPG / PNG / GIF / WebP 四种图片格式，其他文件一律拒绝。已跳过 ${typeSkipped} 个文件${names.length > 0 ? `：${names.join('、')}${typeSkipped > 3 ? ' 等' : ''}` : ''}`,
+      message: `仅支持 JPG / PNG / GIF / WebP 图片，以及 PDF、Word、Excel、PPT、TXT、Markdown、JSON、XML 等文档与 ZIP / RAR / 7Z / TAR / GZ 压缩包。已跳过 ${typeSkipped} 个文件${names.length > 0 ? `：${names.join('、')}${typeSkipped > 3 ? ' 等' : ''}` : ''}`,
     }
   }
   if (oversizeSkipped > 0) {
-    toast.warning(`单张图片最大 ${RAW_MAX_MB}MB！（已跳过 ${oversizeSkipped} 张超大图片）`)
+    toast.warning(`单个文件最大 ${RAW_MAX_MB}MB！（已跳过 ${oversizeSkipped} 个超大文件）`)
   }
   if (dupNames.length > 0) {
     const shown = dupNames.slice(0, 3).join('、')
@@ -683,7 +723,8 @@ async function handleFiles(list: File[]): Promise<void> {
     rawFile: f,
     rawName: f.name,
     rawSize: f.size,
-    previewUrl: URL.createObjectURL(f),
+    // 仅图片生成预览图（文档/压缩包无可视预览，模板回退到文件图标）
+    previewUrl: f.type.startsWith('image/') ? URL.createObjectURL(f) : '',
     file: null,
     thumbnailFile: null,
     status: 'queued',
@@ -876,10 +917,10 @@ onUnmounted(() => {
 // 单张上传 + 入批量落库队列；失败仅把该任务标记为 error，由调用方决定是否继续
 async function uploadSingle(t: UploadTask): Promise<void> {
   if (!t.file) return
-  // CNB 仓库单图上限 5MB：压缩产物（或原图直传）仍超限 → 该张失败，弹窗在批次收尾统一提示
+  // CNB 仓库单文件上限 15MB：压缩产物（或原图/文档直传）仍超限 → 该张失败，弹窗在批次收尾统一提示
   if (effectiveId.value === 'cnb' && t.file.size > CNB_MAX_BYTES) {
     t.status = 'error'
-    t.errorMsg = 'CNB 仓库最大支持 5MB 图片'
+    t.errorMsg = 'CNB 仓库单文件最大支持 15MB'
     cnbOversizeCount.value++
     return
   }
@@ -949,6 +990,7 @@ async function uploadSingle(t: UploadTask): Promise<void> {
 
     const thumbnailUrl = data.data.thumbnailUrl || ''
     const recordId = crypto.randomUUID()
+    const fileType = effectiveMime(t.rawName, t.file.type)
     const uploadInfo: UploadInfo = {
       url: data.data.url,
       urlOriginal: toCnbUrl(data.data?.assets?.path),
@@ -956,7 +998,7 @@ async function uploadSingle(t: UploadTask): Promise<void> {
       thumbnailOriginalUrl: toCnbUrl(data.data?.thumbnailAssets?.path),
       name: t.rawName,
       size: t.file.size,
-      type: t.file.type,
+      type: fileType,
       compressionRatio: t.compressionRatio,
       width: t.width,
       height: t.height,
@@ -977,7 +1019,7 @@ async function uploadSingle(t: UploadTask): Promise<void> {
         recordId,
         name: t.rawName,
         size: t.file.size,
-        type: t.file.type,
+        type: fileType,
         createdAt: Date.now(),
       })
     }
@@ -990,7 +1032,7 @@ async function uploadSingle(t: UploadTask): Promise<void> {
       url: data.data.url,
       thumbnailUrl: thumbnailUrl || undefined,
       size: t.file.size,
-      type: t.file.type,
+      type: fileType,
       createdAt: Date.now(),
       width: t.width,
       height: t.height,
@@ -1067,7 +1109,7 @@ async function retryTask(t: UploadTask): Promise<void> {
 // 并发上传：同时传 CONCURRENCY 张，单张失败不中断批次
 const CONCURRENCY = 3
 
-// CNB 5MB 超限计数（批次内累计，收尾统一弹窗一次）
+// CNB 15MB 超限计数（批次内累计，收尾统一弹窗一次）
 const cnbOversizeCount = ref(0)
 
 async function startUpload(): Promise<void> {
@@ -1099,7 +1141,7 @@ async function startUpload(): Promise<void> {
   if (cnbOversizeCount.value > 0) {
     alertModal.value = {
       title: '超出 CNB 仓库限制',
-      message: `CNB 仓库最大支持 5MB 图片！本次 ${cnbOversizeCount.value} 张图片压缩后仍超过 5MB，已停止上传。可切换到其他存储桶（顶栏下拉）或调低压缩质量后重试。`,
+      message: `CNB 仓库单文件最大支持 15MB！本次 ${cnbOversizeCount.value} 个文件仍超过 15MB，未上传。可切换到其他存储桶（顶栏下拉）或调低压缩质量后重试。`,
     }
     cnbOversizeCount.value = 0
   }

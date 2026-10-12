@@ -3,10 +3,14 @@ import { ref, computed } from 'vue'
 // qrcode 体积较大，改为 toggleQr 内动态 import，首屏主包不再包含
 import { buildFormats, type UploadResult, type LinkFormatKey } from '@/utils/formatLinks'
 import { copyTextFallback } from '@/utils/clipboard'
-import { Link2, Code2, Braces, Hash, Copy, Check, ChevronDown, Image as ImageIcon, Server, QrCode } from 'lucide-vue-next'
+import { isImageType } from '@/utils/format'
+import { Link2, Code2, Braces, Hash, Copy, Check, ChevronDown, Image as ImageIcon, Server, QrCode, FileText, Download } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 
 const props = defineProps<{ info: UploadResult }>()
+
+// 非图片（文档/压缩包）：展示文件图标 + 下载，不做 <img> 预览与缩略图嵌入
+const isImage = computed(() => isImageType(props.info.type, props.info.name))
 
 // 链接以外的格式默认收起，批量上传时避免整页卡片过长
 const showMore = ref(false)
@@ -120,12 +124,26 @@ const toggleQr = async () => {
         <div class="group relative aspect-[4/3] w-full max-w-[280px]">
           <div class="relative h-full overflow-hidden rounded-xl bg-gray-100 ring-1 ring-gray-200/60 transition-transform duration-300 group-hover:scale-[1.02] dark:bg-gray-800 dark:ring-gray-700/60">
             <img
+              v-if="isImage"
               :src="previewSrc"
               class="h-full w-full object-cover"
               alt="Uploaded Preview"
               @error="onPreviewError"
             />
-            <div class="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity duration-300 group-hover:opacity-100">
+            <!-- 非图片：文件图标 + 下载（代理强制下载，无法内联预览） -->
+            <div v-else class="flex h-full w-full flex-col items-center justify-center gap-2 px-4 text-center">
+              <FileText class="h-12 w-12 text-indigo-400 dark:text-indigo-300" />
+              <span class="line-clamp-2 max-w-[220px] break-all text-xs font-semibold text-gray-500 dark:text-gray-400" :title="info.name">{{ info.name }}</span>
+              <a
+                :href="info.url"
+                download
+                class="mt-1 flex items-center gap-1.5 rounded-full bg-indigo-600 px-4 py-1.5 text-xs font-semibold text-white shadow-sm transition-transform hover:scale-105"
+              >
+                <Download class="h-3.5 w-3.5" />
+                下载文件
+              </a>
+            </div>
+            <div v-if="isImage" class="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity duration-300 group-hover:opacity-100">
               <a :href="info.url" target="_blank" class="translate-y-2 transition-all duration-300 group-hover:translate-y-0">
                 <div class="flex items-center gap-2 rounded-full bg-white px-4 py-2 text-xs font-semibold text-gray-900 shadow-lg transition-transform hover:scale-105">
                   <ImageIcon class="h-3.5 w-3.5" />
@@ -160,7 +178,7 @@ const toggleQr = async () => {
           <div v-if="showQr && qrDataUrl" class="flex flex-col items-center gap-2 rounded-2xl bg-white p-4 shadow-xl ring-1 ring-gray-900/5 dark:bg-gray-800 dark:ring-white/10">
             <img :src="qrDataUrl" alt="链接二维码" class="h-[180px] w-[180px] rounded-lg" />
             <p class="max-w-[200px] truncate text-[11px] text-gray-400 dark:text-gray-500" :title="info.url">{{ info.url }}</p>
-            <p class="text-xs font-semibold text-gray-500 dark:text-gray-400">手机扫码直接取图</p>
+            <p class="text-xs font-semibold text-gray-500 dark:text-gray-400">{{ isImage ? '手机扫码直接取图' : '手机扫码下载文件' }}</p>
           </div>
         </Transition>
       </div>

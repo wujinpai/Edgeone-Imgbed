@@ -6,6 +6,7 @@ import {
   Trash2,
   ExternalLink,
   FileImage,
+  FileText,
   AlertCircle,
   Search,
   X,
@@ -34,7 +35,7 @@ import {
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import { buildFormats } from '@/utils/formatLinks'
-import { formatCompactSize } from '@/utils/format'
+import { formatCompactSize, isImageType } from '@/utils/format'
 import { copyTextFallback } from '@/utils/clipboard'
 import { useUploadSettings } from '@/composables/useUploadSettings'
 import { flushPendingRecords } from '@/utils/pendingRecords'
@@ -755,10 +756,14 @@ const handleSelectClick = (item: ImageRecord, e: { shiftKey: boolean }) => {
   shiftAnchorId.value = item.id
 }
 
-// 选择模式下缩略图点击 = 切换选中；浏览模式 = 打开大图预览
+// 选择模式下缩略图点击 = 切换选中；浏览模式 = 打开大图预览（非图片直接新窗口下载）
 const onThumbClick = (item: ImageRecord, e: MouseEvent) => {
   if (selectMode.value) {
     handleSelectClick(item, e)
+    return
+  }
+  if (!isImageType(item.type, item.name)) {
+    window.open(item.url, '_blank', 'noopener')
     return
   }
   lightboxItem.value = item
@@ -1579,6 +1584,7 @@ onUnmounted(() => {
                   :title="selectMode ? '点击选择' : '点击查看大图'"
                 >
                   <img
+                    v-if="isImageType(item.type, item.name)"
                     :src="item.thumbnailUrl || item.url"
                     :alt="item.name"
                     :width="item.width"
@@ -1588,6 +1594,10 @@ onUnmounted(() => {
                     @error="onThumbError"
                     class="h-full w-full select-none object-cover transition-transform duration-300 group-hover:scale-105"
                   />
+                  <!-- 非图片：文件图标（浏览模式点击新窗口下载；选择模式仍可点选） -->
+                  <div v-else class="flex h-full w-full items-center justify-center">
+                    <FileText class="h-10 w-10 text-gray-300 dark:text-gray-600" />
+                  </div>
                 </button>
                 <!-- 左上：多选指示器（浏览模式 hover 露出的 checkbox / 选择模式常显指示器） -->
                 <label
@@ -1852,6 +1862,7 @@ onUnmounted(() => {
                 :title="selectMode ? '点击选择' : '点击查看大图'"
               >
                 <img
+                  v-if="isImageType(item.type, item.name)"
                   :src="item.thumbnailUrl || item.url"
                   :width="item.width"
                   :height="item.height"
@@ -1861,6 +1872,9 @@ onUnmounted(() => {
                   loading="lazy"
                   decoding="async"
                 />
+                <div v-else class="flex h-full w-full items-center justify-center">
+                  <FileText class="h-6 w-6 text-gray-400 dark:text-gray-500" />
+                </div>
               </button>
 
               <!-- 文件名 + 链接（弹性主列，最小宽度 0 才能正确截断） -->
@@ -1870,7 +1884,7 @@ onUnmounted(() => {
                 </p>
                 <div class="mt-0.5 flex items-center gap-2 text-xs text-gray-400 dark:text-gray-500">
                   <a :href="item.url" target="_blank" rel="noopener noreferrer" class="inline-flex shrink-0 items-center gap-0.5 text-indigo-600 hover:underline dark:text-indigo-400">
-                    查看原图 <ExternalLink class="h-3 w-3" />
+                    {{ isImageType(item.type, item.name) ? '查看原图' : '下载文件' }} <ExternalLink class="h-3 w-3" />
                   </a>
                   <span class="whitespace-nowrap tabular-nums">{{ formatSize(item.size) }}</span>
                   <!-- 中屏起显示尺寸与格式 -->
@@ -1993,11 +2007,24 @@ onUnmounted(() => {
           </div>
           <div class="relative">
             <img
+              v-if="isImageType(lightboxItem.type, lightboxItem.name)"
               :key="lightboxItem.id"
               :src="lightboxItem.url"
               :alt="lightboxItem.name"
               class="max-h-[62vh] max-w-[90vw] rounded-2xl object-contain shadow-2xl"
             />
+            <!-- 非图片：无内联预览，展示文件图标 + 下载 -->
+            <div v-else class="flex flex-col items-center gap-4 rounded-2xl bg-gray-800/80 px-12 py-12 shadow-2xl">
+              <FileText class="h-16 w-16 text-indigo-300" />
+              <p class="max-w-[320px] truncate text-sm font-semibold text-white" :title="lightboxItem.name">{{ lightboxItem.name }}</p>
+              <a
+                :href="lightboxItem.url"
+                download
+                class="flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-indigo-500"
+              >
+                <Download class="h-3.5 w-3.5" /> 下载文件
+              </a>
+            </div>
             <template v-if="filteredList.length > 1">
               <button
                 @click.stop="lightboxStep(-1)"
@@ -2036,7 +2063,7 @@ onUnmounted(() => {
               rel="noopener noreferrer"
               class="flex h-8 shrink-0 items-center gap-1 rounded-lg bg-white/10 px-2.5 text-xs font-semibold text-white transition-colors hover:bg-white/20"
             >
-              原图 <ExternalLink class="h-3 w-3" />
+              {{ isImageType(lightboxItem.type, lightboxItem.name) ? '原图' : '下载' }} <ExternalLink class="h-3 w-3" />
             </a>
             <button
               v-if="trashMode"

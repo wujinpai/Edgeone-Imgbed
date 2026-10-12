@@ -16,6 +16,18 @@ export function formatCompactCount(n: number): string {
   return String(Math.round(n))
 }
 
+/** 图片扩展名（MIME 缺失时的兜底判定） */
+const IMAGE_EXT_RE = /\.(jpe?g|png|gif|webp|bmp|avif)$/i
+
+/**
+ * 图片类型判定：MIME 优先，缺失时按文件名扩展名兜底。
+ * 非图片（文档/压缩包）在展示层走文件图标 + 下载，不做 <img> 预览。
+ */
+export function isImageType(type?: string, name?: string): boolean {
+  if (type) return type.startsWith('image/')
+  return !!name && IMAGE_EXT_RE.test(name)
+}
+
 /** 时间戳 → HH:MM（今日）或 MM-DD（更早），最近上传卡片用 */
 export function formatRecentTime(ts: number): string {
   const d = new Date(ts)

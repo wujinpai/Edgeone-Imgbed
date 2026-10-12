@@ -42,7 +42,9 @@ import { authMiddleware, rateLimiter, sharedRateLimiter, sharedLimiter, getClien
 
 const upload = multer({
   limits: {
-    fileSize: MAX_UPLOAD_MB * 1024 * 1024, // 单文件上限（默认 25MB，MAX_UPLOAD_MB 可调）
+    // multer 是请求级硬上限，取各后端中的最大者（CNB 默认 50MB > 其他桶 25MB）；
+    // 各后端在 uploadOneImage 内再做精确校验，避免放宽 CNB 时连带放宽其他桶
+    fileSize: Math.max(MAX_UPLOAD_MB, CNB_MAX_MB) * 1024 * 1024,
     files: 2, // 最多 2 个文件（主图 + 缩略图）
   },
   fileFilter: (req, file, cb) => {
@@ -93,13 +95,17 @@ async function uploadOneImage(buffer: Buffer, fileName: string, contentType: str
   const backend = await getActiveBackend(requestedStorage)
   const image = isImageName(fileName)
   if (backend.kind === 'cnb') {
-    // CNB 单文件上限 15MB（前端已有同口径前置校验，这里服务端强制兜底）
+    // CNB 单文件上限 50MB（前端已有同口径前置校验，这里服务端强制兜底）
     if (buffer.length > CNB_MAX_BYTES) {
       throw new Error(`CNB 仓库单文件最大 ${CNB_MAX_MB}MB`)
     }
     // 图片走 imgs 通道，文档/压缩包走 files 通道；直链同形，代理按扩展名自动分流
     const result = await uploadToCnb({ fileBuffer: buffer, fileName, type: image ? 'imgs' : 'files' })
     return { url: buildPublicUrl(result.url), assets: result.assets }
+  }
+  // 非 CNB 桶沿用 MAX_UPLOAD_MB：multer 请求级上限已放宽到 CNB 的 50MB，这里补回各桶自身限制
+  if (buffer.length > MAX_UPLOAD_MB * 1024 * 1024) {
+    throw new Error(`文件超过 ${MAX_UPLOAD_MB}MB 上限`)
   }
   const quotaError = await checkQuotaForUpload(backend.cfg, buffer.length)
   if (quotaError) throw new Error(quotaError)

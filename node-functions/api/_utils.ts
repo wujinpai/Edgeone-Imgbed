@@ -369,8 +369,8 @@ async function proxyImageRequest(
         }
         const contentType = isImg ? upstreamType : 'application/octet-stream'
         const contentLength = response.headers.get('content-length')
-        // 代理上限 30MB：超限直接 413，避免 arrayBuffer 全量进内存拖垮实例
-        if (contentLength && Number(contentLength) > 30 * 1024 * 1024) {
+        // 代理上限与 CNB 上传上限同口径：超限直接 413，避免 arrayBuffer 全量进内存拖垮实例
+        if (contentLength && Number(contentLength) > CNB_MAX_BYTES) {
           await response.arrayBuffer().catch(() => {})
           return res.status(413).json({ error: 'File too large to proxy' })
         }
@@ -549,12 +549,12 @@ function isAllowedFileName(name: string): boolean {
 }
 
 /**
- * CNB 对象存储单文件上限（MB）：官方 OpenAPI 未文档化限制，按需求取 15MB。
+ * CNB 对象存储单文件上限（MB）：官方 OpenAPI 未文档化限制，按需求取 50MB。
  * 上传主图/文件走 CNB 时由服务端强制校验（前端亦有同名前置校验）。
  */
 const CNB_MAX_MB = (() => {
   const n = Number(process.env.CNB_MAX_UPLOAD_MB)
-  return Number.isFinite(n) && n > 0 ? Math.min(100, Math.round(n)) : 15
+  return Number.isFinite(n) && n > 0 ? Math.min(100, Math.round(n)) : 50
 })()
 const CNB_MAX_BYTES = CNB_MAX_MB * 1024 * 1024
 

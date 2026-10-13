@@ -17,7 +17,9 @@ import { isMainImagePath } from '../node-functions/api/_utils'
 
 // _utils.ts 顶层 import crypto from 'node:crypto'，Node 环境直接可跑
 beforeAll(() => {
-  process.env.AUTH_SECRET = 'test-secret'
+  // token 签名密钥现在仅从 SITE_PASSWORD 派生（AUTH_SECRET 专用于内部鉴权）
+  process.env.SITE_PASSWORD = 'test-password'
+  delete process.env.AUTH_SECRET
 })
 
 describe('detectImageMime', () => {
@@ -83,7 +85,7 @@ describe('signAuthToken / verifyAuthToken', () => {
   it('过期 token 校验失败', () => {
     // 签一个已过期的 token：直接构造 payload 用已知 secret 签名
     const payload = Buffer.from(JSON.stringify({ exp: Date.now() - 1000, nonce: 'x' })).toString('base64url')
-    const sig = crypto.createHmac('sha256', 'test-secret').update(payload).digest('base64url')
+    const sig = crypto.createHmac('sha256', 'imgbed-auth:test-password').update(payload).digest('base64url')
     expect(verifyAuthToken(`${payload}.${sig}`)).toBe(false)
   })
   it('错误密钥签发的 token 校验失败', () => {
@@ -97,7 +99,10 @@ describe('signAuthToken / verifyAuthToken', () => {
 // 靠"同一密钥派生规则 + 同一 payload/sig 格式"互认。任何一侧改动导致互认破裂时在此暴露，
 // 避免部署后 /image-records 全量 401
 describe('跨端 token 互认契约（Node 签发 ↔ Edge 校验）', () => {
-  const edgeEnv = { AUTH_SECRET: 'test-secret' }
+  // edge 侧只配 SITE_PASSWORD，与 node 侧 beforeAll 保持一致
+  const edgeEnv = { SITE_PASSWORD: 'test-password' }
+  // 与 getAuthSecret() 的派生规则一致，供手工构造签名用
+  const TOKEN_SECRET = 'imgbed-auth:test-password'
 
   it('Node 签发的 token 可被 Edge 侧校验通过', async () => {
     const token = signAuthToken(false)
@@ -114,7 +119,7 @@ describe('跨端 token 互认契约（Node 签发 ↔ Edge 校验）', () => {
   })
   it('过期 token 被 Edge 侧拒绝', async () => {
     const payload = Buffer.from(JSON.stringify({ exp: Date.now() - 1000, nonce: 'x' })).toString('base64url')
-    const sig = crypto.createHmac('sha256', 'test-secret').update(payload).digest('base64url')
+    const sig = crypto.createHmac('sha256', TOKEN_SECRET).update(payload).digest('base64url')
     expect(await verifyAuthTokenEdge(`${payload}.${sig}`, edgeEnv)).toBe(false)
   })
   it('Edge 侧风格（Web Crypto）签名的 token 可被 Node 侧校验通过', async () => {
@@ -122,7 +127,7 @@ describe('跨端 token 互认契约（Node 签发 ↔ Edge 校验）', () => {
     const payload = Buffer.from(JSON.stringify({ exp: Date.now() + 60000, nonce: 'edge-nonce' })).toString('base64url')
     const key = await globalThis.crypto.subtle.importKey(
       'raw',
-      new TextEncoder().encode('test-secret'),
+      new TextEncoder().encode(TOKEN_SECRET),
       { name: 'HMAC', hash: 'SHA-256' },
       false,
       ['sign'],

@@ -76,8 +76,9 @@ pnpm test            # Vitest 单元测试（含 SigV4 官方向量、KV 集成�
     SLUG_IMG=CNB 对象存储仓库名（格式：用户名/仓库名）
     TOKEN_IMG=CNB 仓库访问令牌（权限见「获取 CNB TOKEN」一节）
     SITE_PASSWORD=访问密码（可选）
-    AUTH_SECRET=令牌与内部接口签名密钥（使用多存储桶功能时必填，建议随机长字符串；
-        修改后所有登录令牌立即失效，口令泄露时可用此方式强制全端下线）
+    AUTH_SECRET=内部接口签名密钥（多存储桶功能必填，建议随机长字符串；
+        仅用于 node↔edge 内部鉴权，不参与用户登录令牌；用户令牌由 SITE_PASSWORD
+        派生，故修改 SITE_PASSWORD 才会使所有登录令牌立即失效）
     PICGO_TOKEN=PicGo 上传接口令牌（可选，设置后启用 /api/upload/picgo）
     MAX_UPLOAD_MB=单文件大小上限（可选，默认 5，最大 100；非图床文件与 S3 桶共用）
     CNB_MAX_UPLOAD_MB=CNB 仓库单文件上限（可选，默认 5，最大 100）

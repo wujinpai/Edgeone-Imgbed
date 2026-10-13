@@ -6,12 +6,16 @@ const AUTH_TOKEN_TTL_MS = 24 * 60 * 60 * 1000
 const REMEMBER_TOKEN_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
 /**
- * 获取认证密钥：优先使用 AUTH_SECRET 环境变量，
- * 未设置时从 SITE_PASSWORD 派生，保证已有部署无需新增配置即可使用
- * （导出供 _storage 的内部端点鉴权复用，保证派生规则单一来源）
+ * 用户 token 签名密钥：仅从 SITE_PASSWORD 派生，不使用 AUTH_SECRET。
+ * 原因：node（签发）与 edge（校验）各自维护环境变量，AUTH_SECRET 在两边
+ * 可能不一致 → 签出的 token 在 edge 验不过 → 登录后被弹回登录页。
+ * 而 SITE_PASSWORD 是登录成功的前提（登录即证明两边一致），
+ * 故以此为签名密钥可保证 edge 一定能验过 node 签发的 token。
+ * AUTH_SECRET 仍由 getInternalAuthSecret() 专用于 node↔edge 内部鉴权，
+ * 不参与用户 token，职责分离、互不干扰。
  */
 export function getAuthSecret(): string {
-  return process.env.AUTH_SECRET || `imgbed-auth:${process.env.SITE_PASSWORD || ''}`
+  return `imgbed-auth:${process.env.SITE_PASSWORD || ''}`
 }
 
 /**

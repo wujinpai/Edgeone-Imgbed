@@ -22,9 +22,13 @@ function json(code, msg, data, status = 200) {
   })
 }
 
-// 与 node-functions/api/_utils.ts 保持一致的密钥派生规则
+// 用户 token 签名密钥：仅从 SITE_PASSWORD 派生（与 node-functions/api/_utils.ts 一致）。
+// 不使用 AUTH_SECRET：node 与 edge 各自维护环境变量，AUTH_SECRET 可能两边不一致，
+// 导致 node 签的 token 在 edge 验不过 → 登录后被弹回。SITE_PASSWORD 是登录成功的
+// 前提，两边必然一致，故以此为签名密钥可保证 edge 一定能验过。
+// AUTH_SECRET 仍由 internalAuthToken() 专用于 node↔edge 内部鉴权。
 function getAuthSecret(env) {
-  return env?.AUTH_SECRET || `imgbed-auth:${env?.SITE_PASSWORD || ''}`
+  return `imgbed-auth:${env?.SITE_PASSWORD || ''}`
 }
 
 // base64url 解码为二进制字符串
